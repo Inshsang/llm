@@ -197,7 +197,8 @@ class PointTransformer(nn.Module):
         # transformer
         x = self.blocks(x, pos)
         x = self.norm(x) # * B, G + 1(cls token)(513), C(384)
-        if not self.use_max_pool:
-            return x
-        concat_f = torch.cat([x[:, 0], x[:, 1:].max(1)[0]], dim=-1).unsqueeze(1) # * concat the cls token and max pool the features of different tokens, make it B, 1, C
-        return concat_f # * B, 1, C(384 + 384)
+        # if not self.use_max_pool:
+        #     return x
+        concat_f = torch.cat([x[:, 0], x[:, 1:].max(1)[0]], dim=-1)# * concat the cls token and max pool the features of different tokens, make it B, 1, C
+        ret = self.cls_head_finetune[0](concat_f)
+        return ret # * B, 1, C(384 + 384)

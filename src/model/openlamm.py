@@ -5,7 +5,7 @@ import torch
 import torch.nn.functional as F
 from PIL import Image, ImageFile
 from torch.nn.utils import rnn
-
+import open3d as o3d
 import conversations
 from header import *
 from transformers import StoppingCriteria, StoppingCriteriaList
@@ -217,7 +217,7 @@ class LAMMPEFTModel(nn.Module):
                 self.num_vision_token = 1
                 assert self.num_vision_token == 1, "Only 1 global token is available!"
             elif self.vision_feature_type == "local":  # patch features from CLIP ViT
-                self.vision_hidden_size = 1024
+                self.vision_hidden_size = 384
                 self.num_vision_token = min(
                     self.num_vision_token, 256
                 )  # may cut partial tokens
@@ -307,8 +307,11 @@ class LAMMPEFTModel(nn.Module):
         self.llama_tokenizer.padding_side = "right"
         print("Language decoder initialized.")
 
+        # self.llama_proj = nn.Linear(
+        #     self.vision_hidden_size, self.llama_model.config.hidden_size
+        # )
         self.llama_proj = nn.Linear(
-            self.vision_hidden_size, self.llama_model.config.hidden_size
+            256, self.llama_model.config.hidden_size
         )
         print("LLaMa projection layer initialized.")
 
@@ -364,14 +367,15 @@ class LAMMPEFTModel(nn.Module):
             if self.vision_feature_type == "global":
                 raise NotImplementedError("Global feature not implemented for pcl")
             elif self.vision_feature_type == "local":
-                embeddings = self.visual_encoder(inputs)[1][
-                    :, : self.num_vision_token
-                ]  # bsz x 256 x 1024;
-                image_embeds = embeddings.reshape(-1, self.vision_hidden_size).to(
-                    self.llama_model.dtype
-                )  # bsz*num vision token x 1024
-        inputs_llama = self.llama_proj(image_embeds).reshape(
-            -1, self.num_vision_token, self.llama_model.config.hidden_size
+                embeddings = self.point_backbone(inputs)
+                # embeddings = self.visual_encoder(inputs)[1][
+                #     :, : self.num_vision_token
+                # ]  # bsz x 256 x 1024;
+                # image_embeds = embeddings.reshape(-1, self.vision_hidden_size).to(
+                #     self.llama_model.dtype
+                # )  # bsz*num vision token x 1024
+        inputs_llama = self.llama_proj(embeddings).reshape(
+            -1, 1, self.llama_model.config.hidden_size
         )  # bsz x num_vision_token x llama_size
         atts_llama = torch.ones(inputs_llama.size()[:-1], dtype=torch.long).to(
             self.device
@@ -425,19 +429,21 @@ class LAMMPEFTModel(nn.Module):
             return None
         pcl_output = []
         for pcl_path in pcl_paths:
-            mesh_vertices = np.load(pcl_path)  # 150000, 3
-            if not self.use_color:
-                point_cloud = mesh_vertices[:, 0:3]  # do not use color for now
-            else:
-                point_cloud = mesh_vertices[:, 0:6]
-                point_cloud[:, 3:] = (point_cloud[:, 3:] - MEAN_COLOR_RGB) / 256.0
-
-            if self.use_height:
-                floor_height = np.percentile(point_cloud[:, 2], 0.99)
-                height = point_cloud[:, 2] - floor_height
-                point_cloud = np.concatenate(
-                    [point_cloud, np.expand_dims(height, 1)], 1
-                )
+            mesh_vertices = o3d.io.read_point_cloud(pcl_path)
+            point_cloud = np.asarray(mesh_vertices.points)
+            # mesh_vertices = np.load(pcl_path)  # 150000, 3
+            # if not self.use_color:
+            #     point_cloud = mesh_vertices[:, 0:3]  # do not use color for now
+            # else:
+            #     point_cloud = mesh_vertices[:, 0:6]
+            #     point_cloud[:, 3:] = (point_cloud[:, 3:] - MEAN_COLOR_RGB) / 256.0
+            #
+            # if self.use_height:
+            #     floor_height = np.percentile(point_cloud[:, 2], 0.99)
+            #     height = point_cloud[:, 2] - floor_height
+            #     point_cloud = np.concatenate(
+            #         [point_cloud, np.expand_dims(height, 1)], 1
+            #     )
 
             point_cloud, _ = random_sampling(
                 point_cloud, self.num_points, return_choices=True
@@ -547,6 +553,7 @@ class LAMMPEFTModel(nn.Module):
         ), "{} expected but {} given".format(self.valid_type, inputs["vision_type"])
         task_type = inputs["task_type"]
         vision_paths = inputs["vision_paths"]
+
         if self.vision_type == "image":
             vision_embeds, _ = self.encode_image(vision_paths)
         elif self.vision_type == "pcl":

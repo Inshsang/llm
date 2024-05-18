@@ -29,6 +29,27 @@ from torch.utils.data import Dataset
 from tqdm import tqdm
 import jsonlines
 
+class_mapping = {
+    "cabinet": 0,
+    "bed": 1,
+    "chair": 2,
+    "sofa": 3,
+    "diningtable": 4,
+    "doorway": 5,
+    "window": 6,
+    "shelf": 7,
+    "painting": 8,
+    "countertop": 9,
+    "desk": 10,
+    # "curtain": 11,  #
+    "fridge": 12,
+    # "showercurtrain": 13,  #
+    "toilet": 14,
+    "sink": 15,
+    # "bathtub": 16,  #
+    "garbagecan": 17,
+}
+
 class LAMMDataset(Dataset):
     """LAMM Dataset"""
 
@@ -67,15 +88,22 @@ class LAMMDataset(Dataset):
                 id = next(iter(lines))
                 if int(id)<500 or int(id)>=10000:
                     continue
+
+                inclass_box = []
                 bbox = lines[id]
-                self.detection_gt[id] = bbox
+                for i in bbox:
+                    if not len(i):
+                        continue
+                    if i['name'].lower() in class_mapping.keys():
+                        inclass_box.append(i)
+                self.detection_gt[int(id)] = inclass_box
 
     def __len__(self):
         """get dataset length
 
         :return int: length of dataset
         """
-        return len(self.vision_path_list)
+        return len(self.detection_gt)
 
     def __getitem__(self, i):
         """get one sample"""
