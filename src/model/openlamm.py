@@ -11,7 +11,7 @@ from header import *
 from transformers import StoppingCriteria, StoppingCriteriaList
 import logging
 logger = logging.getLogger(__name__)
-
+import numpy as np
 from .CLIP import load as load_clip
 from .EPCL import build_epcl_encoder
 from .pointbert.point_encoder import PointTransformer
@@ -30,6 +30,56 @@ VISION_TAGS = {
     "eov": {"image": "</Img>", "pcl": "</Pcl>"},
 }
 
+def farthest_point_sample(point, npoint=8192):
+    """
+    Input:
+        xyz: pointcloud data, [N, D]
+        npoint: number of samples
+    Return:
+        centroids: sampled pointcloud index, [npoint, D]
+    """
+    N, D = point.shape
+    xyz = point[:,:3]
+    centroids = np.zeros((npoint,))
+    distance = np.ones((N,)) * 1e10
+    farthest = np.random.randint(0, N)
+    for i in range(npoint):
+        centroids[i] = farthest
+        centroid = xyz[farthest, :]
+        dist = np.sum((xyz - centroid) ** 2, -1)
+        mask = dist < distance
+        distance[mask] = dist[mask]
+        farthest = np.argmax(distance, -1)
+    point = point[centroids.astype(np.int32)]
+    return point
+
+def cut_point_cloud(point_cloud, bbox_list):
+    cut_parts = []
+    for bbox in bbox_list:
+        # Extracting xyzwlh from bbox
+        x, y, z, width, length, height = bbox
+
+        # Finding points within the bbox
+        mask = torch.stack((
+            point_cloud[:, 0] >= x - width / 2,
+            point_cloud[:, 0] <= x + width / 2,
+            point_cloud[:, 1] >= y - length / 2,
+            point_cloud[:, 1] <= y + length / 2,
+            point_cloud[:, 2] >= z - height / 2,
+            point_cloud[:, 2] <= z + height / 2),dim=0
+        )
+        mask = torch.all(mask, dim=0, keepdim=False)
+
+        # Applying the mask to extract points
+        cut_part = point_cloud[mask]
+        cut_part = cut_part.numpy()
+
+        while (len(cut_part)<8192):
+            cut_part = interpolate_points(cut_part)
+        cut_part = cut_part[np.random.choice(cut_part.shape[0], 8192, replace=False)]
+        cut_parts.append(cut_part)
+
+    return cut_parts
 
 class LAMMStoppingCriteria(StoppingCriteria):
     def __init__(self, stops, input_ids):
@@ -171,6 +221,34 @@ def make_prompt_start(use_system=False, vision_type="image", task_type="normal")
     else:
         return PROMPT_START
 
+def interpolate_points(point_cloud, target_points=8192):
+    n_points = len(point_cloud)
+
+    while n_points < target_points:
+        # 计算每个点与其最近邻点的距离
+        distances = np.sum((point_cloud[:, np.newaxis] - point_cloud) ** 2, axis=-1)
+        np.fill_diagonal(distances, np.inf)  # 避免将点与自身匹配
+
+        # 找到每个点的最近邻点索引
+        nearest_indices = np.argmin(distances, axis=1)
+
+        # 对每个点进行插值
+        interpolated_points = []
+        for i, idx in enumerate(nearest_indices):
+            interpolated_points.append((point_cloud[i] + point_cloud[idx]) / 2)
+
+        # 添加插值点到原始点云中
+        point_cloud = np.concatenate([point_cloud, np.array(interpolated_points)])
+
+        # 更新点的数量
+        n_points = len(point_cloud)
+
+    # 如果点的数量超过目标值，随机选择一些点
+    # if n_points > target_points:
+    #     indices = np.random.choice(n_points, target_points, replace=False)
+    #     point_cloud = point_cloud[indices]
+
+    return point_cloud
 
 class LAMMPEFTModel(nn.Module):
     """LoRA for LAMM model"""
@@ -382,6 +460,19 @@ class LAMMPEFTModel(nn.Module):
         )  # bsz x 1/256
         return inputs_llama, atts_llama
 
+    def encode_obj_pcl(self, device,obj_list):
+        with torch.no_grad():
+            if self.vision_feature_type == "global":
+                raise NotImplementedError("Global feature not implemented for pcl")
+            elif self.vision_feature_type == "local":
+                objs = torch.tensor(np.asarray(obj_list)).to(self.llama_model.dtype).to(device)
+                embedding = self.point_backbone(objs)
+
+        atts_llama = torch.ones(embedding.size()[:-1], dtype=torch.long).to(
+            self.device
+        )  # bsz x 1/256
+        return embedding, atts_llama
+
     def clip_encode_image(self, inputs):
         inputs = inputs.to(self.llama_model.dtype)  # clip requires torch.float32
     
@@ -553,16 +644,32 @@ class LAMMPEFTModel(nn.Module):
         ), "{} expected but {} given".format(self.valid_type, inputs["vision_type"])
         task_type = inputs["task_type"]
         vision_paths = inputs["vision_paths"]
+        detection_gt = inputs["detection_gt"]
 
-        if self.vision_type == "image":
-            vision_embeds, _ = self.encode_image(vision_paths)
-        elif self.vision_type == "pcl":
-            vision_embeds, _ = self.encode_pcl(vision_paths)  # Bsz x N token x C
-        else:
-            raise ValueError("vision type [{}] not supported".format(self.vision_type))
+        assert str(detection_gt[0]['id']) in vision_paths[0]
+        obj_list = []
+        for i in detection_gt[0]['bbox']:
+            obj_list.append(i['BoundingBox'])
+        obj_list = obj_list[:2]
 
+        # load pcl data
+        pcl_output = []
+        for pcl_path in vision_paths:
+            mesh_vertices = o3d.io.read_point_cloud(pcl_path)
+            point_cloud = np.asarray(mesh_vertices.points)
+            pcl_output.append(torch.from_numpy(point_cloud))
+        scene = torch.stack(pcl_output, dim=0)
 
+        cut_obj = cut_point_cloud(scene[0],obj_list)
 
+        vision_embeds,_ = self.encode_obj_pcl(self.device,cut_obj)
+
+        # if self.vision_type == "image":
+        #     vision_embeds, _ = self.encode_image(vision_paths)
+        # elif self.vision_type == "pcl":
+        #     vision_embeds, _ = self.encode_pcl(vision_paths)  # Bsz x N token x C
+        # else:
+        #     raise ValueError("vision type [{}] not supported".format(self.vision_type))
 
         output_texts = inputs["output_texts"]
         input_ids, target_ids, attention_mask = process_batch_instance(
