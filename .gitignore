@@ -1,0 +1,33 @@
+# source file related
+*.pyc
+*.o
+
+
+
+*.so
+*.egg
+*.egg-info
+
+
+
+# training related
+*.log
+*.pth
+*.pt
+*.model
+*.0
+
+# result related
+answers/
+ckpt/
+ckpt3d/
+
+*.jsonl
+
+
+# assets related
+data/
+datasets/
+model_zoo/
+
+# package related
