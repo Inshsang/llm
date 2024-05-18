@@ -27,7 +27,7 @@ ckpt3d/
 
 # assets related
 data/
-datasets/
+#datasets/
 model_zoo/
 
 # package related
