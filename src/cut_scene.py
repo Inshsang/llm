@@ -101,7 +101,8 @@ def cut_point_cloud(point_cloud, bbox_list):
         # o3d.visualization.draw_geometries([pcd])
         while (len(cut_part)<8192):
             cut_part = interpolate_points(cut_part)
-        cut_part = farthest_point_sample(cut_part,8192)
+        cut_part = cut_part[np.random.choice(cut_part.shape[0], 8192, replace=False)]
+        # cut_part = farthest_point_sample(cut_part,8192)
         cut_parts.append(cut_part)
 
     return cut_parts
@@ -128,13 +129,19 @@ class_mapping = {
 }
 
 detection_gt = []
-save_path = '/media/kou/Data1/htc/LAMM/data/cut_scene.dat'
+# save_path = '/media/kou/Data1/htc/LAMM/data/cut_scene_test_label.dat'
+# save_path = '/media/kou/Data1/htc/LAMM/data/cut_scene_train_label.dat'
+save_path = '/media/kou/Data1/htc/LAMM/data/cut_scene_test.dat'
+# save_path = '/media/kou/Data1/htc/LAMM/data/cut_scene_train.dat'
+
 with open("/media/kou/Data1/htc/MYDATA/BenchMark/Task/GT/pro_Detection.json", "r") as G:
     jsonlines_data = jsonlines.Reader(G)
     for lines in jsonlines_data:
         id = next(iter(lines))
-        if int(id) < 500 or int(id) >= 10000:
+        if int(id) >= 500:
             continue
+        # if int(id) < 500 or int(id) >= 10000:
+        #     continue
         # if int(id) >= 10000:
         #     continue
 
@@ -154,7 +161,7 @@ for item in json.load(f):
     vision_path_list.append(one_vision_path)
 
 
-label = np.load('/media/kou/Data1/htc/LAMM/data/cut_scene_label.dat',allow_pickle=True)
+label = np.load('/media/kou/Data1/htc/LAMM/data/cut_scene_test_label.dat',allow_pickle=True)
 p0 = 0
 pos = []
 for p in label:
@@ -168,30 +175,31 @@ for l in detection_gt:
 import sharedmem
 # 创建共享数组
 list_of_points = sharedmem.empty((lenth, 8192, 3), dtype=np.float32)
-# list_of_labels = sharedmem.empty(len(detection_gt), dtype=np.int32)
-# for index in tqdm(range(len(datapath)), total=len(datapath)):
+list_of_labels = sharedmem.empty(len(detection_gt), dtype=np.int32)
+
 def cal(index):
     global list_of_points, list_of_labels, detection_gt, vision_path_list
     print(index)
     bbox = detection_gt[index]['bbox']
-    path = '/media/kou/Data3/htc/scene/'+vision_path_list[index]+'.ply'
+    path = '/media/kou/Data3/htc/scene/' +str(detection_gt[index]['id']) + '.ply'
+    # path = '/media/kou/Data3/htc/scene/'+vision_path_list[index]+'.ply'
     points = o3d.io.read_point_cloud(path)
     scene = np.asarray(points.points)
     objs = cut_point_cloud(scene,bbox)
     for i,obj in enumerate(objs):
         list_of_points[pos[index]+i] = obj
-    # list_of_labels[index] = len(box)
+    list_of_labels[index] = len(bbox)
 
 
 lock = multiprocessing.Lock()
 
 # 创建线程池，限制最多10个线程
 from multiprocessing import Pool
-max_processes = 1
+max_processes = 30
 pool = Pool(processes=max_processes)
 
 num_jobs = len(detection_gt)  # 总共要执行的任务数
-
+# num_jobs = 1  # 总共要执行的任务数
 # 启动进程池
 pool.map(cal, range(num_jobs))
 
@@ -206,8 +214,10 @@ print(list_of_points)
 
 # 将共享数组或列表转换为普通的numpy数组或列表
 points_array = np.array(list(list_of_points))
-#labels_array = np.array(list(list_of_labels))
+# labels_array = np.array(list(list_of_labels))
 
+# with open(save_path, 'wb') as f:
+#     pickle.dump(labels_array, f)
 with open(save_path, 'wb') as f:
     pickle.dump(points_array, f)
 # with open(save_path, 'wb') as f:
