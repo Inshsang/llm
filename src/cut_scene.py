@@ -107,6 +107,30 @@ def cut_point_cloud(point_cloud, bbox_list):
 
     return cut_parts
 
+# def cut_point_cloud(point_cloud, bbox_list):
+#     cut_parts = []
+#     for bbox in bbox_list:
+#         # Extracting xyzwlh from bbox
+#         x, y, z, width, length, height = bbox['BoundingBox']
+#
+#         # Finding points within the bbox
+#         mask = np.stack((
+#             point_cloud[:, 0] >= x - width / 2,
+#             point_cloud[:, 0] <= x + width / 2,
+#             point_cloud[:, 1] >= y - length / 2,
+#             point_cloud[:, 1] <= y + length / 2,
+#             point_cloud[:, 2] >= z - height / 2,
+#             point_cloud[:, 2] <= z + height / 2),axis=0
+#         )
+#         mask = np.all(mask, axis=0)
+#
+#         # Applying the mask to extract points
+#         cut_part = point_cloud[mask]
+#
+#         if len(cut_part)==0:
+#             print(bbox,"########################")
+#     return cut_parts
+
 class_mapping = {
     "cabinet": 0,
     "bed": 1,
@@ -131,19 +155,17 @@ class_mapping = {
 detection_gt = []
 # save_path = '/media/kou/Data1/htc/LAMM/data/cut_scene_test_label.dat'
 # save_path = '/media/kou/Data1/htc/LAMM/data/cut_scene_train_label.dat'
-save_path = '/media/kou/Data1/htc/LAMM/data/cut_scene_test.dat'
-# save_path = '/media/kou/Data1/htc/LAMM/data/cut_scene_train.dat'
+# save_path = '/media/kou/Data1/htc/LAMM/data/cut_scene_test.dat'
+save_path = '/media/kou/Data1/htc/LAMM/data/cut_scene_train.dat'
 
 with open("/media/kou/Data1/htc/MYDATA/BenchMark/Task/GT/pro_Detection.json", "r") as G:
     jsonlines_data = jsonlines.Reader(G)
     for lines in jsonlines_data:
         id = next(iter(lines))
-        if int(id) >= 500:
+        # if int(id) >= 500:
+        #     continue
+        if int(id) < 500 or int(id) >= 10000:
             continue
-        # if int(id) < 500 or int(id) >= 10000:
-        #     continue
-        # if int(id) >= 10000:
-        #     continue
 
         inclass_box = []
         bbox = lines[id]
@@ -161,7 +183,7 @@ for item in json.load(f):
     vision_path_list.append(one_vision_path)
 
 
-label = np.load('/media/kou/Data1/htc/LAMM/data/cut_scene_test_label.dat',allow_pickle=True)
+label = np.load('/media/kou/Data1/htc/LAMM/data/cut_scene_train_label.dat',allow_pickle=True)
 p0 = 0
 pos = []
 for p in label:
@@ -179,23 +201,23 @@ list_of_labels = sharedmem.empty(len(detection_gt), dtype=np.int32)
 
 def cal(index):
     global list_of_points, list_of_labels, detection_gt, vision_path_list
-    print(index)
     bbox = detection_gt[index]['bbox']
     path = '/media/kou/Data3/htc/scene/' +str(detection_gt[index]['id']) + '.ply'
     # path = '/media/kou/Data3/htc/scene/'+vision_path_list[index]+'.ply'
     points = o3d.io.read_point_cloud(path)
     scene = np.asarray(points.points)
     objs = cut_point_cloud(scene,bbox)
-    for i,obj in enumerate(objs):
-        list_of_points[pos[index]+i] = obj
-    list_of_labels[index] = len(bbox)
+    # for i,obj in enumerate(objs):
+    #     list_of_points[pos[index]+i] = obj
+    print(index, 'over')
+    # list_of_labels[index] = len(bbox)
 
 
 lock = multiprocessing.Lock()
 
 # 创建线程池，限制最多10个线程
 from multiprocessing import Pool
-max_processes = 30
+max_processes = 20
 pool = Pool(processes=max_processes)
 
 num_jobs = len(detection_gt)  # 总共要执行的任务数
@@ -208,7 +230,7 @@ pool.close()
 pool.join()
 
 # 现在list_of_points和list_of_labels已经被修改
-print(list_of_points)
+# print(list_of_points)
 # print(list_of_labels)
 
 
