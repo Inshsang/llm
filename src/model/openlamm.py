@@ -60,19 +60,18 @@ def cut_point_cloud(point_cloud, bbox_list):
         x, y, z, width, length, height = bbox
 
         # Finding points within the bbox
-        mask = torch.stack((
+        mask = np.stack((
             point_cloud[:, 0] >= x - width / 2,
             point_cloud[:, 0] <= x + width / 2,
             point_cloud[:, 1] >= y - length / 2,
             point_cloud[:, 1] <= y + length / 2,
             point_cloud[:, 2] >= z - height / 2,
-            point_cloud[:, 2] <= z + height / 2),dim=0
+            point_cloud[:, 2] <= z + height / 2),axis=0
         )
-        mask = torch.all(mask, dim=0, keepdim=False)
+        mask = np.all(mask, axis=0)
 
         # Applying the mask to extract points
         cut_part = point_cloud[mask]
-        cut_part = cut_part.numpy()
 
         while (len(cut_part)<8192):
             cut_part = interpolate_points(cut_part)
@@ -657,13 +656,13 @@ class LAMMPEFTModel(nn.Module):
         for pcl_path in vision_paths:
             mesh_vertices = o3d.io.read_point_cloud(pcl_path)
             point_cloud = np.asarray(mesh_vertices.points)
-            pcl_output.append(torch.from_numpy(point_cloud))
-        scene = torch.stack(pcl_output, dim=0)
+            pcl_output.append(point_cloud)
+        scene = pcl_output
 
         cut_obj = cut_point_cloud(scene[0],obj_list)
 
         vision_embeds,_ = self.encode_obj_pcl(self.device,cut_obj)
-
+        vision_embeds = self.llama_proj(vision_embeds)
         # if self.vision_type == "image":
         #     vision_embeds, _ = self.encode_image(vision_paths)
         # elif self.vision_type == "pcl":
