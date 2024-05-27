@@ -330,7 +330,8 @@ class LAMMPEFTModel(nn.Module):
             base_ckpt = {k.replace("module.", ""): v for k, v in state_dict['base_model'].items()}
             self.point_backbone.load_state_dict(base_ckpt, strict=True)
 
-            # self.point_backbone.eval()
+            self.point_backbone.to(device)
+            self.point_backbone.eval()
 
             if self.vision_feature_type == "global":
                 raise NotImplementedError("Global feature not implemented for EPCL")
@@ -645,11 +646,11 @@ class LAMMPEFTModel(nn.Module):
         vision_paths = inputs["vision_paths"]
         detection_gt = inputs["detection_gt"]
 
-        assert str(detection_gt[0]['id']) in vision_paths[0]
-        obj_list = []
-        for i in detection_gt[0]['bbox']:
-            obj_list.append(i['BoundingBox'])
-        obj_list = obj_list[:2]
+        # assert str(detection_gt[0]['id']) in vision_paths[0]
+        # obj_list = []
+        # for i in detection_gt[0]['bbox']:
+        #     obj_list.append(i['BoundingBox'])
+        # obj_list = obj_list[:2]
 
         # load pcl data
         pcl_output = []
@@ -659,10 +660,14 @@ class LAMMPEFTModel(nn.Module):
             pcl_output.append(point_cloud)
         scene = pcl_output
 
-        cut_obj = cut_point_cloud(scene[0],obj_list)
+        # cut_obj = cut_point_cloud(scene[0],obj_list)
 
-        vision_embeds,_ = self.encode_obj_pcl(self.device,cut_obj)
-        vision_embeds = self.llama_proj(vision_embeds)
+        vis_embed = []
+        for i in detection_gt:
+            vision_embeds,_ = self.encode_obj_pcl(self.device,i)
+            vision_embeds = self.llama_proj(vision_embeds)
+            vis_embed.append(vision_embeds)
+        vision_embeds = vis_embed
         # if self.vision_type == "image":
         #     vision_embeds, _ = self.encode_image(vision_paths)
         # elif self.vision_type == "pcl":

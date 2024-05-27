@@ -158,7 +158,7 @@ detection_gt = []
 # save_path = '/media/kou/Data1/htc/LAMM/data/cut_scene_test.dat'
 save_path = '/media/kou/Data1/htc/LAMM/data/cut_scene_train.dat'
 
-with open("/media/kou/Data1/htc/MYDATA/BenchMark/Task/GT/pro_Detection.json", "r") as G:
+with open("/media/kou/Data1/htc/MYDATA/BenchMark/Task/GT/Detection.json", "r") as G:
     jsonlines_data = jsonlines.Reader(G)
     for lines in jsonlines_data:
         id = next(iter(lines))
@@ -207,8 +207,8 @@ def cal(index):
     points = o3d.io.read_point_cloud(path)
     scene = np.asarray(points.points)
     objs = cut_point_cloud(scene,bbox)
-    # for i,obj in enumerate(objs):
-    #     list_of_points[pos[index]+i] = obj
+    for i,obj in enumerate(objs):
+        list_of_points[pos[index]+i] = obj
     print(index, 'over')
     # list_of_labels[index] = len(bbox)
 

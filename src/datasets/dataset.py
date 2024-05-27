@@ -21,7 +21,7 @@ import random
 from torch.nn.utils.rnn import pad_sequence
 from dataclasses import dataclass, field
 from typing import Callable, Dict, Sequence
-
+import pickle
 import torch
 import torch.distributed as dist
 import transformers
@@ -81,38 +81,49 @@ class LAMMDataset(Dataset):
             self.caption_list.append(one_caption)
             self.task_type_list.append(task_type)
         print(f"[!] collect {len(self.vision_path_list)} samples for training")
-        self.detection_gt = []
-        with open("/media/kou/Data1/htc/MYDATA/BenchMark/Task/GT/pro_Detection.json", "r") as G:
-            jsonlines_data = jsonlines.Reader(G)
-            for lines in jsonlines_data:
-                id = next(iter(lines))
-                if int(id)<500 or int(id)>=10000:
-                    continue
-
-                inclass_box = []
-                bbox = lines[id]
-                for i in bbox:
-                    if not len(i):
-                        continue
-                    if i['name'].lower() in class_mapping.keys():
-                        inclass_box.append(i)
-                self.detection_gt.append({'id':int(id),'bbox':inclass_box})
+        with open("/media/kou/Data1/htc/LAMM/data/cut_scene_train.dat", 'rb') as f:
+            self.detection_gt = pickle.load(f)
+        with open("/media/kou/Data1/htc/LAMM/data/cut_scene_train_label.dat", 'rb') as f:
+            self.detection_gt_label = pickle.load(f)
+        p0 = 0
+        self.pos = []
+        for p in self.detection_gt_label:
+            self.pos.append(p0)
+            p0 += p
+        # self.detection_gt = []
+        # with open("/media/kou/Data1/htc/MYDATA/BenchMark/Task/GT/pro_Detection.json", "r") as G:
+        #     jsonlines_data = jsonlines.Reader(G)
+        #     for lines in jsonlines_data:
+        #         id = next(iter(lines))
+        #         if int(id)<500 or int(id)>=10000:
+        #             continue
+        #
+        #         inclass_box = []
+        #         bbox = lines[id]
+        #         for i in bbox:
+        #             if not len(i):
+        #                 continue
+        #             if i['name'].lower() in class_mapping.keys():
+        #                 inclass_box.append(i)
+        #         self.detection_gt.append({'id':int(id),'bbox':inclass_box})
 
     def __len__(self):
         """get dataset length
 
         :return int: length of dataset
         """
-        return len(self.detection_gt)
+        return len(self.pos)
 
     def __getitem__(self, i):
         """get one sample"""
+        detection_gt_label = self.detection_gt_label[i]
+        pos = self.pos[i]
         return dict(
             vision_paths=self.vision_path_list[i],
             output_texts=self.caption_list[i],
             vision_type=self.vision_type,
             task_type=self.task_type_list[i],
-            detection_gt=self.detection_gt[i],
+            detection_gt = self.detection_gt[pos:pos+detection_gt_label]
         )
 
     def collate(self, instances):
