@@ -23,7 +23,7 @@ def parser_args():
     parser.add_argument(
         "--max_tgt_len",
         type=int,
-        default=400,
+        default=1000,
         help="max length of post-image texts in LLM input",
     )
     parser.add_argument(
@@ -115,7 +115,7 @@ def parser_args():
     # flash attention
     parser.add_argument(
         "--use_flash_attn",
-        default=False,
+        default=True,
         action="store_true",
         help="whether to use flash attention to speed up",
     )

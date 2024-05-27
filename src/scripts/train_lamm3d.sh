@@ -1,5 +1,5 @@
 #!/bin/bash
-numgpu=1
+numgpu=4
 
 exp=$1
 dataname=$2
@@ -8,18 +8,18 @@ now=$(date +"%Y%m%d_%H%M%S")
 
 ckpt_dir=../ckpt
 mkdir -p ${ckpt_dir}/${exp}/log_rest/
-deepspeed --include localhost:3 --master_addr 127.0.0.1 --master_port 28457 train.py \
+deepspeed --include localhost:2,3,4,5 --master_addr 127.0.0.1 --master_port 28457 train.py \
     --stage 1 \
     --cfg /media/kou/Data1/htc/LAMM/src/config/train_ds3.yaml \
-    --data_path  /media/kou/Data1/htc/LAMM/data/3D_Instruct/meta_file/LAMM_3dinstruct_10k.json \
+    --data_path  /media/kou/Data1/htc/LAMM/data/3D_Instruct/meta_file/Detection.json \
     --vision_root_path /media/kou/Data1/htc/LAMM/data/3D_Instruct/ \
-    --max_tgt_len 400 \
+    --max_tgt_len 1000 \
     --vision_type pcl \
     --use_system \
     --model lamm_peft \
     --encoder_pretrain epcl \
     --encoder_ckpt_path /media/kou/Data1/htc/LAMM/model_zoo/epcl_vit-L_256tokens/epcl_scannet_vit-L-14_256tokens_latest.pth \
-    --vicuna_ckpt_path /media/kou/Data1/htc/LAMM/model_zoo/Vicuna_7B_v0/ \
+    --vicuna_ckpt_path /media/kou/Data1/htc/LAMM/model_zoo/Vicuna_7B_v0 \
     --vision_feature_type ${visfeat_type} \
     --num_vision_token 256 \
     --save_path  ${ckpt_dir}/${exp} \

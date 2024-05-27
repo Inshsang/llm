@@ -132,7 +132,6 @@ def build_one_instance(tokenizer, conversation, vision_type="image"):
     """
     pos = VISION_TAGS["pos"][vision_type]
     eov = VISION_TAGS["eov"][vision_type]
-
     text_list = []
     turn_num = len(conversation)
     input_ids, target_ids = [], []
@@ -166,13 +165,14 @@ def build_one_instance(tokenizer, conversation, vision_type="image"):
         text_list.append(text)
         assert len(input_ids) == len(target_ids)
     return text_list, input_ids, target_ids
-
-
+    """'</Pcl> Find and give coordinates for objects within an indoor point cloud.
+    ### Assistant:Situated at the [13.77, 0.32, 0.99, 2.81, 0.63, 1.0] coordinates within the point cloud, there exists an object, classified as DiningTable.
+    ###'
+    """
 def process_batch_instance(
     tokenizer, batch_of_conversations, max_tgt_len, vision_type="image"
 ):
     """build one batch of instance for training
-
     :param class tokenizer: text tokenizer
     :param list batch_of_conversations: batch of conversations
     :param int max_tgt_len: max token length of after vision tokens
@@ -183,7 +183,7 @@ def process_batch_instance(
     for conversation in batch_of_conversations:
         _, one_input_ids, one_target_ids = build_one_instance(
             tokenizer, conversation, vision_type=vision_type
-        )
+        )#单论对话结尾本不应该是###
         batch_input_ids.append(torch.LongTensor(one_input_ids))
         batch_target_ids.append(torch.LongTensor(one_target_ids))
     input_ids = rnn.pad_sequence(
@@ -551,7 +551,7 @@ class LAMMPEFTModel(nn.Module):
         input_ids = input_ids.to(self.device)  # bsz x s2
         target_ids = target_ids.to(self.device)  # bsz x s2
         attention_mask = attention_mask.to(self.device)  # bsz x s2
-
+        self.num_vision_token = img_embeds.size()[1]
         batch_size = img_embeds.shape[0]
 
         # return list of headers if multiple tasks
@@ -645,7 +645,8 @@ class LAMMPEFTModel(nn.Module):
         task_type = inputs["task_type"]
         vision_paths = inputs["vision_paths"]
         detection_gt = inputs["detection_gt"]
-
+        class_gt = inputs["class_gt"]
+        batch_size = len(vision_paths)
         # assert str(detection_gt[0]['id']) in vision_paths[0]
         # obj_list = []
         # for i in detection_gt[0]['bbox']:
@@ -662,12 +663,35 @@ class LAMMPEFTModel(nn.Module):
 
         # cut_obj = cut_point_cloud(scene[0],obj_list)
 
-        vis_embed = []
+        vis_embed_list = []
         for i in detection_gt:
-            vision_embeds,_ = self.encode_obj_pcl(self.device,i)
-            vision_embeds = self.llama_proj(vision_embeds)
-            vis_embed.append(vision_embeds)
-        vision_embeds = vis_embed
+            vis_embeds,_ = self.encode_obj_pcl(self.device,i)
+            vis_embeds = self.llama_proj(vis_embeds)
+            vis_embed_list.append(vis_embeds)
+
+        class_feature = []
+        for c,p in zip(class_gt[0][:15],vis_embed_list[0][:15]):
+            c = c +' is '
+            class_name = self.llama_tokenizer(
+                c, return_tensors="pt", add_special_tokens=False
+            ).to(
+                self.device
+            )
+            class_name_ids = class_name.input_ids.expand(
+                batch_size, -1
+            )  # bsz x s1
+            class_name_attn_mask = class_name.attention_mask.expand(
+                batch_size, -1
+            )  # bsz x s1
+            # peft model need deeper call
+            class_name_embeds = self.llama_model.model.model.embed_tokens(
+                class_name_ids
+            )
+            class_feature.append(class_name_embeds[0])
+            class_feature.append(p.unsqueeze(dim=0))
+            # .expand(batch_size, -1, -1) # bsz x s1 x embed_dim
+
+        vision_embeds = torch.cat(class_feature, dim=0).unsqueeze(dim=0)
         # if self.vision_type == "image":
         #     vision_embeds, _ = self.encode_image(vision_paths)
         # elif self.vision_type == "pcl":

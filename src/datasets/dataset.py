@@ -90,22 +90,22 @@ class LAMMDataset(Dataset):
         for p in self.detection_gt_label:
             self.pos.append(p0)
             p0 += p
-        # self.detection_gt = []
-        # with open("/media/kou/Data1/htc/MYDATA/BenchMark/Task/GT/pro_Detection.json", "r") as G:
-        #     jsonlines_data = jsonlines.Reader(G)
-        #     for lines in jsonlines_data:
-        #         id = next(iter(lines))
-        #         if int(id)<500 or int(id)>=10000:
-        #             continue
-        #
-        #         inclass_box = []
-        #         bbox = lines[id]
-        #         for i in bbox:
-        #             if not len(i):
-        #                 continue
-        #             if i['name'].lower() in class_mapping.keys():
-        #                 inclass_box.append(i)
-        #         self.detection_gt.append({'id':int(id),'bbox':inclass_box})
+        self.class_gt = []
+        with open("/media/kou/Data1/htc/MYDATA/BenchMark/Task/GT/Detection.json", "r") as G:
+            jsonlines_data = jsonlines.Reader(G)
+            for lines in jsonlines_data:
+                id = next(iter(lines))
+                if int(id)<500 or int(id)>=10000:
+                    continue
+
+                inclass_box = []
+                bbox = lines[id]
+                for i in bbox:
+                    if not len(i):
+                        continue
+                    if i['name'].lower() in class_mapping.keys():
+                        inclass_box.append(i['name'].lower())
+                self.class_gt.append({int(id):inclass_box})
 
     def __len__(self):
         """get dataset length
@@ -118,19 +118,21 @@ class LAMMDataset(Dataset):
         """get one sample"""
         detection_gt_label = self.detection_gt_label[i]
         pos = self.pos[i]
+        class_gt = list(self.class_gt[i].values())[0]
         return dict(
             vision_paths=self.vision_path_list[i],
             output_texts=self.caption_list[i],
             vision_type=self.vision_type,
             task_type=self.task_type_list[i],
-            detection_gt = self.detection_gt[pos:pos+detection_gt_label]
+            detection_gt = self.detection_gt[pos:pos+detection_gt_label],
+            class_gt=class_gt,
         )
 
     def collate(self, instances):
         """collate function for dataloader"""
-        vision_paths, output_texts, task_type ,detection_gt= tuple(
+        vision_paths, output_texts, task_type ,detection_gt,class_gt= tuple(
             [instance[key] for instance in instances]
-            for key in ("vision_paths", "output_texts", "task_type","detection_gt")
+            for key in ("vision_paths", "output_texts", "task_type","detection_gt","class_gt")
         )
         return dict(
             vision_paths=vision_paths,
@@ -138,4 +140,5 @@ class LAMMDataset(Dataset):
             vision_type=self.vision_type,
             task_type=task_type,
             detection_gt=detection_gt,
+            class_gt=class_gt,
         )
