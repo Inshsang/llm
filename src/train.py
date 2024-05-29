@@ -13,8 +13,8 @@ def parser_args():
     parser.add_argument(
         "--data_path",
         type=str,
-        default='/media/kou/Data1/htc/LAMM/data/LAMM_3dinstruct_10k.json',
-        # default='/media/kou/Data3/htc/dataset/3D_Instruct/meta_file/Detection.json',
+        # default='/media/kou/Data1/htc/LAMM/data/LAMM_3dinstruct_10k.json',
+        default='/media/kou/Data3/htc/dataset/3D_Instruct/meta_file/Detection.json',
         # required=True,
         help="the path that stores the data JSON",
     )

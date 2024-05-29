@@ -22,8 +22,8 @@ def load_lamm_dataset(args):
     dataset = LAMMDataset(
         args["data_path"], args["vision_root_path"], args["vision_type"]
     )
-    sampler = torch.utils.data.SequentialSampler(dataset)
-    # sampler = torch.utils.data.RandomSampler(dataset)
+    # sampler = torch.utils.data.SequentialSampler(dataset)
+    sampler = torch.utils.data.RandomSampler(dataset)
     world_size = torch.distributed.get_world_size()
     rank = torch.distributed.get_rank()
     batch_size = (
