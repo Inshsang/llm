@@ -22,9 +22,12 @@ def parser_args():
         "--vision_root_path", type=str, default='/media/kou/Data1/htc/LAMM/data', help="Root dir for images"
     )
     parser.add_argument(
+        "--max_obj_len", type=int, default=10, help="Root dir for images"
+    )
+    parser.add_argument(
         "--max_tgt_len",
         type=int,
-        default=1000,
+        default=400,
         help="max length of post-image texts in LLM input",
     )
     parser.add_argument(
@@ -235,6 +238,7 @@ def main(**args):
     for epoch_i in tqdm(range(args["epochs"])):
         for batch in train_iter:
             agent.train_model(batch, current_step=current_step, pbar=pbar)
+            torch.cuda.empty_cache()
             current_step += 1
         if (
                 epoch_i % max(args["epochs"] // 5, 1) == 0

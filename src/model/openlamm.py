@@ -255,7 +255,7 @@ class LAMMPEFTModel(nn.Module):
     def __init__(self, **args):
         super(LAMMPEFTModel, self).__init__()
         self.args = args
-
+        self.max_obj_len = args["max_obj_len"]
         self.vision_type = args["vision_type"] if "vision_type" in args else "image"
         encoder_pretrain = (
             args["encoder_pretrain"] if "encoder_pretrain" in args else "clip"
@@ -648,7 +648,7 @@ class LAMMPEFTModel(nn.Module):
         class_gt = inputs["class_gt"]
         class_box_gt = inputs["class_box_gt"]
         batch_size = len(vision_paths)
-        max_obj = 10
+        max_obj = self.max_obj_len
 
         vis_embed_list = []
         for i in detection_gt:
