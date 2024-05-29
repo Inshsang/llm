@@ -23,62 +23,12 @@ from .utils.utils import *
 
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 
-
 VISION_TAGS = {
     "pos": {"image": "<image>", "pcl": "<pcl>"},
     "sov": {"image": "<Img>", "pcl": "<Pcl>"},
     "eov": {"image": "</Img>", "pcl": "</Pcl>"},
 }
 
-def farthest_point_sample(point, npoint=8192):
-    """
-    Input:
-        xyz: pointcloud data, [N, D]
-        npoint: number of samples
-    Return:
-        centroids: sampled pointcloud index, [npoint, D]
-    """
-    N, D = point.shape
-    xyz = point[:,:3]
-    centroids = np.zeros((npoint,))
-    distance = np.ones((N,)) * 1e10
-    farthest = np.random.randint(0, N)
-    for i in range(npoint):
-        centroids[i] = farthest
-        centroid = xyz[farthest, :]
-        dist = np.sum((xyz - centroid) ** 2, -1)
-        mask = dist < distance
-        distance[mask] = dist[mask]
-        farthest = np.argmax(distance, -1)
-    point = point[centroids.astype(np.int32)]
-    return point
-
-def cut_point_cloud(point_cloud, bbox_list):
-    cut_parts = []
-    for bbox in bbox_list:
-        # Extracting xyzwlh from bbox
-        x, y, z, width, length, height = bbox
-
-        # Finding points within the bbox
-        mask = np.stack((
-            point_cloud[:, 0] >= x - width / 2,
-            point_cloud[:, 0] <= x + width / 2,
-            point_cloud[:, 1] >= y - length / 2,
-            point_cloud[:, 1] <= y + length / 2,
-            point_cloud[:, 2] >= z - height / 2,
-            point_cloud[:, 2] <= z + height / 2),axis=0
-        )
-        mask = np.all(mask, axis=0)
-
-        # Applying the mask to extract points
-        cut_part = point_cloud[mask]
-
-        while (len(cut_part)<8192):
-            cut_part = interpolate_points(cut_part)
-        cut_part = cut_part[np.random.choice(cut_part.shape[0], 8192, replace=False)]
-        cut_parts.append(cut_part)
-
-    return cut_parts
 
 class LAMMStoppingCriteria(StoppingCriteria):
     def __init__(self, stops, input_ids):
@@ -132,6 +82,7 @@ def build_one_instance(tokenizer, conversation, vision_type="image"):
     """
     pos = VISION_TAGS["pos"][vision_type]
     eov = VISION_TAGS["eov"][vision_type]
+
     text_list = []
     turn_num = len(conversation)
     input_ids, target_ids = [], []
@@ -165,14 +116,13 @@ def build_one_instance(tokenizer, conversation, vision_type="image"):
         text_list.append(text)
         assert len(input_ids) == len(target_ids)
     return text_list, input_ids, target_ids
-    """'</Pcl> Find and give coordinates for objects within an indoor point cloud.
-    ### Assistant:Situated at the [13.77, 0.32, 0.99, 2.81, 0.63, 1.0] coordinates within the point cloud, there exists an object, classified as DiningTable.
-    ###'
-    """
+
+
 def process_batch_instance(
-    tokenizer, batch_of_conversations, max_tgt_len, vision_type="image"
+        tokenizer, batch_of_conversations, max_tgt_len, vision_type="image"
 ):
     """build one batch of instance for training
+
     :param class tokenizer: text tokenizer
     :param list batch_of_conversations: batch of conversations
     :param int max_tgt_len: max token length of after vision tokens
@@ -182,8 +132,8 @@ def process_batch_instance(
     batch_input_ids, batch_target_ids = [], []
     for conversation in batch_of_conversations:
         _, one_input_ids, one_target_ids = build_one_instance(
-            tokenizer, conversation, vision_type=vision_type
-        )#单论对话结尾本不应该是###
+            tokenizer, conversation,vision_type=vision_type
+        )
         batch_input_ids.append(torch.LongTensor(one_input_ids))
         batch_target_ids.append(torch.LongTensor(one_target_ids))
     input_ids = rnn.pad_sequence(
@@ -220,34 +170,6 @@ def make_prompt_start(use_system=False, vision_type="image", task_type="normal")
     else:
         return PROMPT_START
 
-def interpolate_points(point_cloud, target_points=8192):
-    n_points = len(point_cloud)
-
-    while n_points < target_points:
-        # 计算每个点与其最近邻点的距离
-        distances = np.sum((point_cloud[:, np.newaxis] - point_cloud) ** 2, axis=-1)
-        np.fill_diagonal(distances, np.inf)  # 避免将点与自身匹配
-
-        # 找到每个点的最近邻点索引
-        nearest_indices = np.argmin(distances, axis=1)
-
-        # 对每个点进行插值
-        interpolated_points = []
-        for i, idx in enumerate(nearest_indices):
-            interpolated_points.append((point_cloud[i] + point_cloud[idx]) / 2)
-
-        # 添加插值点到原始点云中
-        point_cloud = np.concatenate([point_cloud, np.array(interpolated_points)])
-
-        # 更新点的数量
-        n_points = len(point_cloud)
-
-    # 如果点的数量超过目标值，随机选择一些点
-    # if n_points > target_points:
-    #     indices = np.random.choice(n_points, target_points, replace=False)
-    #     point_cloud = point_cloud[indices]
-
-    return point_cloud
 
 class LAMMPEFTModel(nn.Module):
     """LoRA for LAMM model"""
@@ -276,9 +198,9 @@ class LAMMPEFTModel(nn.Module):
 
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-        # print(
-        #     f"Initializing [{encoder_pretrain}] visual encoder from {encoder_ckpt_path} [{device}]..."
-        # )
+        print(
+            f"Initializing [{encoder_pretrain}] visual encoder from {encoder_ckpt_path} [{device}]..."
+        )
 
         # -1 for last embedding; -2 for transformer output
         self.vision_feature_type = args["vision_feature_type"]
@@ -294,7 +216,7 @@ class LAMMPEFTModel(nn.Module):
                 self.num_vision_token = 1
                 assert self.num_vision_token == 1, "Only 1 global token is available!"
             elif self.vision_feature_type == "local":  # patch features from CLIP ViT
-                self.vision_hidden_size = 384
+                self.vision_hidden_size = 1024
                 self.num_vision_token = min(
                     self.num_vision_token, 256
                 )  # may cut partial tokens
@@ -311,46 +233,48 @@ class LAMMPEFTModel(nn.Module):
                 self.args["num_points"] if "num_points" in self.args else 40000
             )
 
-            # Pointbert
-            point_bert_config_addr = os.path.join(os.path.dirname(__file__), "pointbert", "PointTransformer_base_8192point.yaml")
-            print(f"Loading PointBERT config from {point_bert_config_addr}.")
-            point_bert_config = cfg_from_yaml_file(point_bert_config_addr)
-            if self.use_color:
-                point_bert_config.model.point_dims = 6
-
-            self.point_backbone = PointTransformer(point_bert_config.model, use_max_pool=False)
-            # logger.info(f"Using {self.point_backbone.point_dims} dim of points.")
-            # self.point_backbone.load_checkpoint("/media/kou/Data1/htc/Point-BERT/ckpts/Point-BERT.pth")
-
-            # load state dict
-            map_location = {'cuda:%d' % 0: 'cuda:%d' % args['local_rank']}
-            state_dict = torch.load("/media/kou/Data1/htc/Point-BERT/experiments/PointTransformer_8192point/ModelNet_models/default/ckpt-last.pth", map_location=map_location)
-            # parameter resume of base model
-            # if args.local_rank == 0:
-            base_ckpt = {k.replace("module.", ""): v for k, v in state_dict['base_model'].items()}
-            self.point_backbone.load_state_dict(base_ckpt, strict=True)
-
-            self.point_backbone.to(device)
-            self.point_backbone.eval()
-
             if self.vision_feature_type == "global":
                 raise NotImplementedError("Global feature not implemented for EPCL")
             else:
                 self.vision_hidden_size = 1024
                 self.num_vision_token = self.num_vision_token
-            # self.visual_encoder = build_epcl_encoder(
-            #     pretrain=True, store_path=encoder_ckpt_path, device=device
-            # )
-
+            self.visual_encoder = build_epcl_encoder(
+                pretrain=True, store_path=encoder_ckpt_path, device=device
+            )
         else:
             raise NotImplementedError(
                 f"Encoder {self.encoder_pretrain} not implemented!"
             )
 
-        # # freeze vision encoder
-        # for name, param in self.visual_encoder.named_parameters():
-        #     param.requires_grad = False
-        # self.visual_encoder.eval()
+        # Pointbert
+        point_bert_config_addr = os.path.join(os.path.dirname(__file__), "pointbert",
+                                              "PointTransformer_base_8192point.yaml")
+        print(f"Loading PointBERT config from {point_bert_config_addr}.")
+        point_bert_config = cfg_from_yaml_file(point_bert_config_addr)
+        if self.use_color:
+            point_bert_config.model.point_dims = 6
+
+        self.point_backbone = PointTransformer(point_bert_config.model, use_max_pool=False)
+        # logger.info(f"Using {self.point_backbone.point_dims} dim of points.")
+        # self.point_backbone.load_checkpoint("/media/kou/Data1/htc/Point-BERT/ckpts/Point-BERT.pth")
+
+        # load state dict
+        map_location = {'cuda:%d' % 0: 'cuda:%d' % args['local_rank']}
+        state_dict = torch.load(
+            "/media/kou/Data1/htc/Point-BERT/experiments/PointTransformer_8192point/ModelNet_models/default/ckpt-last.pth",
+            map_location=map_location)
+        # parameter resume of base model
+        # if args.local_rank == 0:
+        base_ckpt = {k.replace("module.", ""): v for k, v in state_dict['base_model'].items()}
+        self.point_backbone.load_state_dict(base_ckpt, strict=True)
+
+        self.point_backbone.to(device)
+        self.point_backbone.eval()
+
+        # freeze vision encoder
+        for name, param in self.visual_encoder.named_parameters():
+            param.requires_grad = False
+        self.visual_encoder.eval()
         print("Visual encoder initialized.")
 
         print(f"Initializing language decoder from {vicuna_ckpt_path} ...")
@@ -385,10 +309,10 @@ class LAMMPEFTModel(nn.Module):
         self.llama_tokenizer.padding_side = "right"
         print("Language decoder initialized.")
 
-        # self.llama_proj = nn.Linear(
-        #     self.vision_hidden_size, self.llama_model.config.hidden_size
-        # )
         self.llama_proj = nn.Linear(
+            self.vision_hidden_size, self.llama_model.config.hidden_size
+        )
+        self.llama_proj_my = nn.Linear(
             256, self.llama_model.config.hidden_size
         )
         print("LLaMa projection layer initialized.")
@@ -445,15 +369,14 @@ class LAMMPEFTModel(nn.Module):
             if self.vision_feature_type == "global":
                 raise NotImplementedError("Global feature not implemented for pcl")
             elif self.vision_feature_type == "local":
-                embeddings = self.point_backbone(inputs)
-                # embeddings = self.visual_encoder(inputs)[1][
-                #     :, : self.num_vision_token
-                # ]  # bsz x 256 x 1024;
-                # image_embeds = embeddings.reshape(-1, self.vision_hidden_size).to(
-                #     self.llama_model.dtype
-                # )  # bsz*num vision token x 1024
-        inputs_llama = self.llama_proj(embeddings).reshape(
-            -1, 1, self.llama_model.config.hidden_size
+                embeddings = self.visual_encoder(inputs)[1][
+                             :, : self.num_vision_token
+                             ]  # bsz x 256 x 1024;
+                image_embeds = embeddings.reshape(-1, self.vision_hidden_size).to(
+                    self.llama_model.dtype
+                )  # bsz*num vision token x 1024
+        inputs_llama = self.llama_proj(image_embeds).reshape(
+            -1, self.num_vision_token, self.llama_model.config.hidden_size
         )  # bsz x num_vision_token x llama_size
         atts_llama = torch.ones(inputs_llama.size()[:-1], dtype=torch.long).to(
             self.device
@@ -486,8 +409,8 @@ class LAMMPEFTModel(nn.Module):
         elif self.vision_feature_type == "local":
             with torch.no_grad():
                 embeddings = self.visual_encoder.forward_patch_features(inputs)[
-                    :, : self.num_vision_token
-                ]  # bsz x self.num_vision_token x 1024
+                             :, : self.num_vision_token
+                             ]  # bsz x self.num_vision_token x 1024
             image_embeds = embeddings.reshape(-1, self.vision_hidden_size).to(
                 self.llama_model.dtype
             )  # bsz*num vision token x 1024
@@ -520,21 +443,19 @@ class LAMMPEFTModel(nn.Module):
             return None
         pcl_output = []
         for pcl_path in pcl_paths:
-            mesh_vertices = o3d.io.read_point_cloud(pcl_path)
-            point_cloud = np.asarray(mesh_vertices.points)
-            # mesh_vertices = np.load(pcl_path)  # 150000, 3
-            # if not self.use_color:
-            #     point_cloud = mesh_vertices[:, 0:3]  # do not use color for now
-            # else:
-            #     point_cloud = mesh_vertices[:, 0:6]
-            #     point_cloud[:, 3:] = (point_cloud[:, 3:] - MEAN_COLOR_RGB) / 256.0
-            #
-            # if self.use_height:
-            #     floor_height = np.percentile(point_cloud[:, 2], 0.99)
-            #     height = point_cloud[:, 2] - floor_height
-            #     point_cloud = np.concatenate(
-            #         [point_cloud, np.expand_dims(height, 1)], 1
-            #     )
+            mesh_vertices = np.load(pcl_path)  # 150000, 3
+            if not self.use_color:
+                point_cloud = mesh_vertices[:, 0:3]  # do not use color for now
+            else:
+                point_cloud = mesh_vertices[:, 0:6]
+                point_cloud[:, 3:] = (point_cloud[:, 3:] - MEAN_COLOR_RGB) / 256.0
+
+            if self.use_height:
+                floor_height = np.percentile(point_cloud[:, 2], 0.99)
+                height = point_cloud[:, 2] - floor_height
+                point_cloud = np.concatenate(
+                    [point_cloud, np.expand_dims(height, 1)], 1
+                )
 
             point_cloud, _ = random_sampling(
                 point_cloud, self.num_points, return_choices=True
@@ -543,7 +464,7 @@ class LAMMPEFTModel(nn.Module):
         return torch.stack(pcl_output, dim=0).to(device)  # bsz x num_points x 3
 
     def prompt_wrap(
-        self, img_embeds, input_ids, target_ids, attention_mask, use_system, task_type
+            self, img_embeds, input_ids, target_ids, attention_mask, use_system, task_type
     ):
         """
         input_ids, target_ids, attention_mask: bsz x s2
@@ -551,8 +472,8 @@ class LAMMPEFTModel(nn.Module):
         input_ids = input_ids.to(self.device)  # bsz x s2
         target_ids = target_ids.to(self.device)  # bsz x s2
         attention_mask = attention_mask.to(self.device)  # bsz x s2
-        self.num_vision_token = img_embeds.size()[1]
-        batch_size = len(img_embeds)
+
+        batch_size = img_embeds.shape[0]
 
         # return list of headers if multiple tasks
         p_before = make_prompt_start(
@@ -594,12 +515,12 @@ class LAMMPEFTModel(nn.Module):
             batch_size, -1, -1
         )  # bsz x s2 x embed_dim
         bos = (
-            torch.ones(
-                [batch_size, 1],
-                dtype=p_before_token_ids.dtype,
-                device=p_before_token_ids.device,
-            )
-            * self.llama_tokenizer.bos_token_id
+                torch.ones(
+                    [batch_size, 1],
+                    dtype=p_before_token_ids.dtype,
+                    device=p_before_token_ids.device,
+                )
+                * self.llama_tokenizer.bos_token_id
         )  # bsz x 1
         bos_embeds = self.llama_model.model.model.embed_tokens(
             bos
@@ -633,28 +554,70 @@ class LAMMPEFTModel(nn.Module):
             [atts_bos, p_before_attn_mask, atts_img, attention_mask], dim=1
         )
         assert (
-            attention_mask.size() == targets.size()
+                attention_mask.size() == targets.size()
         )  # bsz x (1 + s1 + num_image_tokens + s2)
         return inputs_embeds, targets, attention_mask
 
     def forward(self, inputs):
         # image_paths = inputs['image_paths']
         assert (
-            self.vision_type == inputs["vision_type"]
+                self.vision_type == inputs["vision_type"]
         ), "{} expected but {} given".format(self.valid_type, inputs["vision_type"])
+        task_type = inputs["task_type"]
+        vision_paths = inputs["vision_paths"]
+        if self.vision_type == "image":
+            vision_embeds, _ = self.encode_image(vision_paths)
+        elif self.vision_type == "pcl":
+            vision_embeds, _ = self.encode_pcl(vision_paths)  # Bsz x N token x C
+        else:
+            raise ValueError("vision type [{}] not supported".format(self.vision_type))
+
         task_type = inputs["task_type"]
         vision_paths = inputs["vision_paths"]
         detection_gt = inputs["detection_gt"]
         class_gt = inputs["class_gt"]
         class_box_gt = inputs["class_box_gt"]
         batch_size = len(vision_paths)
-        max_obj = 10
 
+        max_obj = 10
         vis_embed_list = []
         for i in detection_gt:
             vis_embeds,_ = self.encode_obj_pcl(self.device,i[:max_obj])
-            vis_embeds = self.llama_proj(vis_embeds)
+            vis_embeds = self.llama_proj_my(vis_embeds)
             vis_embed_list.append(vis_embeds)
+
+        """     
+        max_obj = 10
+        class_feature = []
+        batch_input_ids, batch_target_ids,class_name_target_ids ,cur_class_name= [], [],[],[]
+        insertpos = len(class_gt[0][:max_obj])*[0]
+        index = 0
+        for c,b,p in zip(class_gt[0][:max_obj],class_box_gt[0][:max_obj],vis_embed_list[0][:max_obj]):
+            class_name = c +str(b)+'!'
+            class_name = self.llama_tokenizer(class_name, add_special_tokens=False).input_ids
+            cur_class_name += class_name
+            class_name_target_ids += [-100] * len(class_name)
+            insertpos[index] = len(cur_class_name)
+        batch_input_ids.append(torch.LongTensor(cur_class_name))
+        batch_target_ids.append(torch.LongTensor(class_name_target_ids))
+        input_ids = rnn.pad_sequence(
+            batch_input_ids, batch_first=True, padding_value=self.llama_tokenizer.pad_token_id
+        )
+        target_ids = rnn.pad_sequence(
+            batch_target_ids, batch_first=True, padding_value=-100
+        )
+        assert input_ids.size() == target_ids.size()
+        input_ids = input_ids[:, :self.max_tgt_len]
+        target_ids = target_ids[:, :self.max_tgt_len]
+        attention_mask = input_ids.ne(self.llama_tokenizer.pad_token_id)
+        assert attention_mask.size() == input_ids.size()
+        input_ids = input_ids.to(self.device)  # bsz x s2
+        target_ids = target_ids.to(self.device)  # bsz x s2
+        attention_mask = attention_mask.to(self.device)  # bsz x s2
+        input_embeds = self.llama_model.model.model.embed_tokens(input_ids)
+        """
+
+
 
 
         class_feature = []
@@ -679,8 +642,13 @@ class LAMMPEFTModel(nn.Module):
         for index, vis in enumerate(vis_embed_list[0]):
             vision_embeds_my.append(vis.unsqueeze(dim=0))
             vision_embeds_my.append(input_embeds[index])
-        vision_embeds = torch.cat(vision_embeds_my).unsqueeze(dim=0)
+        vision_embeds_my = torch.cat(vision_embeds_my)
 
+
+        # class_feature.append(input_ids)
+        # class_feature.append(p.unsqueeze(dim=0))
+
+        #vision_embeds = torch.cat(class_feature, dim=0).unsqueeze(dim=0)
         output_texts = inputs["output_texts"]
         input_ids, target_ids, attention_mask = process_batch_instance(
             self.llama_tokenizer, output_texts, self.max_tgt_len, self.vision_type
@@ -702,7 +670,7 @@ class LAMMPEFTModel(nn.Module):
             use_cache=not self.use_flash_attn,
         )
         loss = outputs.loss
-        # calculate the token accuarcy
+        # calculate the token accuarcy25
         chosen_tokens = torch.max(outputs.logits, dim=-1)[1][:, 1:-1]  # [B, S-1]
         labels = targets[:, 2:]
         gen_acc = (chosen_tokens.reshape(-1) == labels.reshape(-1)).to(
@@ -766,19 +734,19 @@ class LAMMPEFTModel(nn.Module):
         p_after_texts = [f"{eov} " + prompt + "\n### Assistant:" for prompt in prompt_list]
         p_after_tokens = self.llama_tokenizer(
             p_after_texts,
-            padding="longest", return_length=True, # padding right
+            padding="longest", return_length=True,  # padding right
             add_special_tokens=False, return_tensors="pt"
         ).to(self.device)
         p_after_masks_len = p_after_tokens.length.max() - p_after_tokens.length
         p_after_embeds = self.llama_model.model.embed_tokens(p_after_tokens.input_ids)
 
         bos = (
-            torch.ones(
-                [batch_size, 1],
-                dtype=p_before_tokens.input_ids.dtype,
-                device=p_before_tokens.input_ids.device,
-            )
-            * self.llama_tokenizer.bos_token_id
+                torch.ones(
+                    [batch_size, 1],
+                    dtype=p_before_tokens.input_ids.dtype,
+                    device=p_before_tokens.input_ids.device,
+                )
+                * self.llama_tokenizer.bos_token_id
         )  # bsz x 1
         bos_embeds = self.llama_model.model.embed_tokens(
             bos
@@ -794,7 +762,7 @@ class LAMMPEFTModel(nn.Module):
         tokens_len = inputs_embeds.shape[1] - p_after_masks_len
         new_inputs_embeds = torch.zeros_like(inputs_embeds)
         inputs_embeds_masks = torch.zeros(inputs_embeds.shape[:-1],
-                                         dtype=torch.int64, device=self.device)
+                                          dtype=torch.int64, device=self.device)
         for idx in range(batch_size):
             inputs_embeds_masks[idx, -tokens_len[idx]:] = 1
             new_inputs_embeds[idx, -tokens_len[idx]:, :] = inputs_embeds[idx, :tokens_len[idx], :]

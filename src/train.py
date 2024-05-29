@@ -13,12 +13,13 @@ def parser_args():
     parser.add_argument(
         "--data_path",
         type=str,
-        default='/media/kou/Data1/htc/LAMM/data/3D_Instruct/meta_file/Detection.json',
+        default='/media/kou/Data1/htc/LAMM/data/LAMM_3dinstruct_10k.json',
+        # default='/media/kou/Data3/htc/dataset/3D_Instruct/meta_file/Detection.json',
         # required=True,
         help="the path that stores the data JSON",
     )
     parser.add_argument(
-        "--vision_root_path", type=str, default='/media/kou/Data1/htc/LAMM/data/3D_Instruct/', help="Root dir for images"
+        "--vision_root_path", type=str, default='/media/kou/Data1/htc/LAMM/data', help="Root dir for images"
     )
     parser.add_argument(
         "--max_tgt_len",
@@ -56,13 +57,13 @@ def parser_args():
     parser.add_argument(
         "--encoder_ckpt_path",
         type=str,
-        default='/media/kou/Data1/htc/LAMM/model_zoo/epcl_vit-L_256tokens/epcl_scannet_vit-L-14_256tokens_latest.pth',
+        default='/media/kou/Data3/htc/epcl_scannet_vit-L-14_256tokens_latest.pth',
         help="path of vision pretrained model; CLIP use default path in cache",
     )
     parser.add_argument(
         "--vicuna_ckpt_path",
         type=str,
-        default='/media/kou/Data1/htc/LAMM/model_zoo/Vicuna_7B_v0',
+        default='/media/kou/Data3/htc/vicuna-7b/',
         #required=True,
         help="path of LLM, default: Vicuna",
     )
@@ -115,7 +116,7 @@ def parser_args():
     # flash attention
     parser.add_argument(
         "--use_flash_attn",
-        default=True,
+        default=False,
         action="store_true",
         help="whether to use flash attention to speed up",
     )

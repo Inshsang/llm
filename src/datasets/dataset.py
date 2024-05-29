@@ -81,14 +81,17 @@ class LAMMDataset(Dataset):
             self.caption_list.append(one_caption)
             self.task_type_list.append(task_type)
         print(f"[!] collect {len(self.vision_path_list)} samples for training")
-        with open("/media/kou/Data1/htc/LAMM/data/cut_scene_train.dat", 'rb') as f:
+        with open("/media/kou/Data3/htc/dataset/cut_scene_train.dat", 'rb') as f:
             self.detection_gt = pickle.load(f)
-        with open("/media/kou/Data1/htc/LAMM/data/cut_scene_train_label.dat", 'rb') as f:
+        self.detection_gt = torch.tensor(self.detection_gt)
+
+        with open("/media/kou/Data3/htc/dataset/cut_scene_train_label.dat", 'rb') as f:
             self.detection_gt_label = pickle.load(f)
+        self.detection_gt_label = torch.tensor(self.detection_gt_label)
         p0 = 0
         self.pos = []
         for p in self.detection_gt_label:
-            self.pos.append(p0)
+            self.pos.append(int(p0))
             p0 += p
         self.class_gt = []
         with open("/media/kou/Data1/htc/MYDATA/BenchMark/Task/GT/Detection.json", "r") as G:
@@ -99,13 +102,15 @@ class LAMMDataset(Dataset):
                     continue
 
                 inclass_box = []
+                inclass_class = []
                 bbox = lines[id]
                 for i in bbox:
                     if not len(i):
                         continue
                     if i['name'].lower() in class_mapping.keys():
                         inclass_box.append(i['name'].lower())
-                self.class_gt.append({int(id):inclass_box})
+                        inclass_class.append(i['BoundingBox'])
+                self.class_gt.append({id:inclass_box,'box':inclass_class})
 
     def __len__(self):
         """get dataset length
@@ -119,6 +124,7 @@ class LAMMDataset(Dataset):
         detection_gt_label = self.detection_gt_label[i]
         pos = self.pos[i]
         class_gt = list(self.class_gt[i].values())[0]
+        class_box = list(self.class_gt[i].values())[1]
         return dict(
             vision_paths=self.vision_path_list[i],
             output_texts=self.caption_list[i],
@@ -126,13 +132,14 @@ class LAMMDataset(Dataset):
             task_type=self.task_type_list[i],
             detection_gt = self.detection_gt[pos:pos+detection_gt_label],
             class_gt=class_gt,
+            class_box_gt=class_box,
         )
 
     def collate(self, instances):
         """collate function for dataloader"""
-        vision_paths, output_texts, task_type ,detection_gt,class_gt= tuple(
+        vision_paths, output_texts, task_type ,detection_gt,class_gt,class_box_gt= tuple(
             [instance[key] for instance in instances]
-            for key in ("vision_paths", "output_texts", "task_type","detection_gt","class_gt")
+            for key in ("vision_paths", "output_texts", "task_type","detection_gt","class_gt","class_box_gt")
         )
         return dict(
             vision_paths=vision_paths,
@@ -141,4 +148,5 @@ class LAMMDataset(Dataset):
             task_type=task_type,
             detection_gt=detection_gt,
             class_gt=class_gt,
+            class_box_gt=class_box_gt,
         )
