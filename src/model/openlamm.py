@@ -256,6 +256,7 @@ class LAMMPEFTModel(nn.Module):
         super(LAMMPEFTModel, self).__init__()
         self.args = args
         self.max_obj_len = args["max_obj_len"]
+        self.task_type = args["task_type"]
         self.vision_type = args["vision_type"] if "vision_type" in args else "image"
         encoder_pretrain = (
             args["encoder_pretrain"] if "encoder_pretrain" in args else "clip"
@@ -331,6 +332,10 @@ class LAMMPEFTModel(nn.Module):
             self.point_backbone.load_state_dict(base_ckpt, strict=True)
 
             self.point_backbone.to(device)
+
+            # freeze vision encoder
+            for name, param in self.point_backbone.named_parameters():
+                param.requires_grad = False
             self.point_backbone.eval()
 
             if self.vision_feature_type == "global":
@@ -365,18 +370,23 @@ class LAMMPEFTModel(nn.Module):
         )
 
         if args.get('use_lightllm', False):
-            self.llama_model = LlamaLightForCausalLM(
-                batch_size=self.args['bs'],
-                max_input_len=1024,
-                max_output_len=args['max_tgt_len'],
-                weight_dir=vicuna_ckpt_path,
-                lora_path=args['delta_ckpt_path'],
-                lora_config=peft_config,
-            )
+            pass
+            # self.llama_model = LlamaLightForCausalLM(
+            #     batch_size=self.args['bs'],
+            #     max_input_len=1024,
+            #     max_output_len=args['max_tgt_len'],
+            #     weight_dir=vicuna_ckpt_path,
+            #     lora_path=args['delta_ckpt_path'],
+            #     lora_config=peft_config,
+            # )
         else:
             self.llama_model = LlamaForCausalLM.from_pretrained(vicuna_ckpt_path)
             self.llama_model = get_peft_model(self.llama_model, peft_config)
             self.llama_model.print_trainable_parameters()
+
+        self.llama_proj = nn.Linear(
+            256, self.llama_model.config.hidden_size
+        )
 
         self.llama_tokenizer = LlamaTokenizer.from_pretrained(
             vicuna_ckpt_path, use_fast=False
@@ -388,9 +398,7 @@ class LAMMPEFTModel(nn.Module):
         # self.llama_proj = nn.Linear(
         #     self.vision_hidden_size, self.llama_model.config.hidden_size
         # )
-        self.llama_proj = nn.Linear(
-            256, self.llama_model.config.hidden_size
-        )
+
         print("LLaMa projection layer initialized.")
 
         self.max_tgt_len = args["max_tgt_len"]

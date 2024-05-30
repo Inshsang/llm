@@ -15,6 +15,8 @@
 import copy
 import os
 import json
+
+import numpy as np
 from tqdm import tqdm
 import ipdb
 import random
@@ -53,7 +55,7 @@ class_mapping = {
 class LAMMDataset(Dataset):
     """LAMM Dataset"""
 
-    def __init__(self, data_file_path: str, vision_root_path: str, vision_type="image"):
+    def __init__(self, data_file_path: str, vision_root_path: str, choose: bool,vision_type="image"):
         """Initialize supervised datasets
 
         :param str data_file_path: path of conversation file path
@@ -62,6 +64,7 @@ class LAMMDataset(Dataset):
         """
         super(LAMMDataset, self).__init__()
         self.vision_type = vision_type
+        self.choose = choose
         with open(data_file_path, "r") as fr:
             json_data = json.load(fr)
 
@@ -80,7 +83,7 @@ class LAMMDataset(Dataset):
             self.vision_path_list.append(one_vision_path)
             self.caption_list.append(one_caption)
             self.task_type_list.append(task_type)
-        print(f"[!] collect {len(self.vision_path_list)} samples for training")
+
         with open("/media/kou/Data3/htc/dataset/cut_scene_train.dat", 'rb') as f:
             self.detection_gt = pickle.load(f)
         self.detection_gt = torch.tensor(self.detection_gt)
@@ -111,13 +114,31 @@ class LAMMDataset(Dataset):
                         inclass_box.append(i['name'].lower())
                         inclass_class.append(i['BoundingBox'])
                 self.class_gt.append({id:inclass_box,'box':inclass_class})
+        if self.choose:
+            choose_tensor = self.detection_gt_label <= 12
+            numall = int(choose_tensor.sum())
+            self.choosen = list(np.array(choose_tensor))
+            new_pos = numall*[None]
+            p0, index = 0,0
+            for f,p in zip(self.choosen,self.detection_gt_label):
+                if f:
+                    new_pos[index] = p0
+                    index += 1
+                p0 += int(p)
+            self.pos = new_pos
+            self.detection_gt_label = self.detection_gt_label[choose_tensor]
+            self.vision_path_list = [path for f, path in zip(self.choosen,self.vision_path_list) if f]
+            self.caption_list = [caption for f, caption in zip(self.choosen, self.caption_list) if f]
+            self.task_type_list = [task_type for f, task_type in zip(self.choosen, self.task_type_list) if f]
+            self.class_gt = [c for i,c in zip(self.choosen,self.class_gt) if i]
+        print(f"[!] collect {len(self.class_gt)} samples for training")
 
     def __len__(self):
         """get dataset length
 
         :return int: length of dataset
         """
-        return len(self.pos)
+        return len(self.class_gt)
 
     def __getitem__(self, i):
         """get one sample"""

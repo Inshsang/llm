@@ -20,7 +20,7 @@ def load_lamm_dataset(args):
     :return tupe: dataset, dataloader, sampler
     """
     dataset = LAMMDataset(
-        args["data_path"], args["vision_root_path"], args["vision_type"]
+        args["data_path"], args["vision_root_path"],args["choose"], args["vision_type"]
     )
     # sampler = torch.utils.data.SequentialSampler(dataset)
     sampler = torch.utils.data.RandomSampler(dataset)

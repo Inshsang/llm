@@ -19,15 +19,21 @@ def parser_args():
         help="the path that stores the data JSON",
     )
     parser.add_argument(
+        "--task_type", type=str, default='description', help="task type"
+    )
+    parser.add_argument(
+        "--choose", type=bool, default=True, help="choose objects <= 12"
+    )
+    parser.add_argument(
         "--vision_root_path", type=str, default='/media/kou/Data1/htc/LAMM/data', help="Root dir for images"
     )
     parser.add_argument(
-        "--max_obj_len", type=int, default=10, help="Root dir for images"
+        "--max_obj_len", type=int, default=12, help="Root dir for images"
     )
     parser.add_argument(
         "--max_tgt_len",
         type=int,
-        default=400,
+        default=450,
         help="max length of post-image texts in LLM input",
     )
     parser.add_argument(
@@ -39,7 +45,7 @@ def parser_args():
     )
     parser.add_argument(
         "--use_system",
-        default=False,
+        default=True,
         action="store_true",
         help="whether to use system messages",
     )
