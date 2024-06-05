@@ -20,7 +20,7 @@ def parse_args():
         "--choose", type=bool, default=True, help="choose objects <= 12"
     )
     parser.add_argument(
-        "--max_obj_len", type=int, default=12, help="Root dir for images"
+        "--max_obj_len", type=int, default=30, help="Root dir for images"
     )
     parser.add_argument('--model', type=str, default='lamm_peft')
     parser.add_argument(
@@ -46,7 +46,7 @@ def parse_args():
     parser.add_argument(
         "--delta_ckpt_path",
         type=str,
-        default="/media/kou/Data1/htc/LAMM/ckpt/detection/pytorch_model.pt",
+        default="/media/kou/Data1/htc/LAMM/ckpt/--detectionenough/pytorch_model_ep8.pt",
         help="path of delta parameters from previous stage; Only matter for stage 2",
     )
     parser.add_argument('--stage', type=int, default=2,)
@@ -60,7 +60,7 @@ def parse_args():
     parser.add_argument('--vision_output_layer', type=int, default=-2, choices=(-1, -2), help='the layer to output visual features; -1 means global from last layer')
     parser.add_argument('--num_vision_token', type=int, default=256) # the maximum sequence length
     # Test configurations
-    parser.add_argument('--max_tgt_len', type=int, default=800, help="maximum length of target sequence at least 400; in case of 1 vision token")
+    parser.add_argument('--max_tgt_len', type=int, default=2000, help="maximum length of target sequence at least 400; in case of 1 vision token")
     parser.add_argument('--conv_mode', type=str, default='simple')
     parser.add_argument("--inference-mode", default='common')
     parser.add_argument("--bs", type=int,default=1)
@@ -164,7 +164,7 @@ def default_response(args,
         pcl_paths=pcl_paths,
         max_length=args.max_tgt_len,
         top_p=0.9,
-        temperature=1.0,
+        temperature=0.8,
         history=[],
         sys_msg=sys_msg,
         obj_list=obj_list,

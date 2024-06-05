@@ -28,7 +28,7 @@ class LAMM_EVAL_3D(Dataset):
         #     self.system_msg = common_task2sysmsg[self.task_name + '3D']
         # self.task_name = common_dataset2task[self.dataset_name]
         self.system_msg = common_task2sysmsg[self.task_type + '3D']
-        json_path = os.path.join(base_data_path, '3D_Benchmark/meta_file', self.task_type + '.json')
+        json_path = os.path.join(base_data_path, 'meta_file', self.task_type + '.json')
         self.data = json.load(open(json_path, 'rb'))
         self.load_data = load_data
     

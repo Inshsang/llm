@@ -37,8 +37,8 @@ def grounding3d_eval(dataset, pred_data, thres=0.5):
         gt_objects = gt
         text = pred['text']
         points = parse_bbox_3d_Vis(text)
-        if len(points) > 10:
-            continue
+        # if len(points) > 10:
+        #     continue
         cnt += len(gt_objects)  # gt_objects,points
         for object_info in gt_objects:
             if (not classification_acc(object_info['name'], text)) and (not (object_info['name'] in text)):
@@ -376,7 +376,7 @@ if __name__ == "__main__":
     # if task_name == 'Class':
     #     jonal = r'G:\event\htc\LAMM\answers\Class\Class.jsonl'
     if task_name == 'Detection':
-        jonal = r'/media/kou/Data1/htc/LAMM/answers/Detection_detection.jsonl'
+        jonal = r'/media/kou/Data1/htc/LAMM/answers/Detection.jsonl'
         import jsonlines
         pred_data = []
 
