@@ -54,12 +54,12 @@ def load_2Deval_dataset(base_data_path,
 
 
 def load_3Deval_dataset(base_data_path,
-                        dataset_name,
+                        task_type,
                         mode='common',
                         load_data=True,
                         batch_size=1):
     dataset = LAMM_EVAL_3D(base_data_path,
-                           dataset_name,
+                           task_type,
                            mode,
                            load_data)
     dataloader = DataLoader(dataset=dataset, batch_size=batch_size, shuffle=False, num_workers=2, drop_last=False, collate_fn=collate_fn)

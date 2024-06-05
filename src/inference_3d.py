@@ -13,7 +13,16 @@ answers_file = ''
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--model', type=str, default='openllama_peft')
+    parser.add_argument(
+        "--task_type", type=str, default='Detection', help="task type"
+    )
+    parser.add_argument(
+        "--choose", type=bool, default=True, help="choose objects <= 12"
+    )
+    parser.add_argument(
+        "--max_obj_len", type=int, default=12, help="Root dir for images"
+    )
+    parser.add_argument('--model', type=str, default='lamm_peft')
     parser.add_argument(
         "--encoder_pretrain",
         type=str,
@@ -24,17 +33,20 @@ def parse_args():
     parser.add_argument(
         "--encoder_ckpt_path",
         type=str,
+        default="/media/kou/Data3/htc/epcl_scannet_vit-L-14_256tokens_latest.pth",
         help="path of vision pretrained model; CLIP use default path in cache",
     )
     parser.add_argument(
         "--vicuna_ckpt_path",
         type=str,
-        required=True,
+        # required=True,
+        default="/media/kou/Data3/htc/vicuna-7b/",
         help="path of LLM, default: Vicuna",
     )
     parser.add_argument(
         "--delta_ckpt_path",
         type=str,
+        default="/media/kou/Data1/htc/LAMM/ckpt/detection/pytorch_model.pt",
         help="path of delta parameters from previous stage; Only matter for stage 2",
     )
     parser.add_argument('--stage', type=int, default=2,)
@@ -45,16 +57,21 @@ def parse_args():
     parser.add_argument('--lora_target_modules', nargs='+', default=['q_proj', 'k_proj', 'v_proj', 'o_proj'])
     # Embedding configurations
     parser.add_argument('--vision_feature_type', type=str, default='local', choices=('local', 'global'))
-    parser.add_argument('--vision_output_layer', type=int, default=-1, choices=(-1, -2), help='the layer to output visual features; -1 means global from last layer')
-    parser.add_argument('--num_vision_token', type=int, default=1) # the maximum sequence length
+    parser.add_argument('--vision_output_layer', type=int, default=-2, choices=(-1, -2), help='the layer to output visual features; -1 means global from last layer')
+    parser.add_argument('--num_vision_token', type=int, default=256) # the maximum sequence length
     # Test configurations
-    parser.add_argument('--max_tgt_len', type=int, default=400, help="maximum length of target sequence at least 400; in case of 1 vision token")
+    parser.add_argument('--max_tgt_len', type=int, default=800, help="maximum length of target sequence at least 400; in case of 1 vision token")
     parser.add_argument('--conv_mode', type=str, default='simple')
-    parser.add_argument("--dataset-name", required=True)
-    parser.add_argument("--base-data-path", required=True)
     parser.add_argument("--inference-mode", default='common')
     parser.add_argument("--bs", type=int,default=1)
-    parser.add_argument("--answers-dir", required=True)
+    parser.add_argument("--dataset-name", default="detection")
+    parser.add_argument("--base-data-path", default="/media/kou/Data1/htc/LAMM/data")
+    parser.add_argument("--answers-dir", default="../answers")
+    # parser.add_argument("--dataset-name", required=True)
+    # parser.add_argument("--base-data-path", required=True)
+    # parser.add_argument("--answers-dir", required=True)
+    parser.add_argument("--local_rank", default=0, type=int)
+
     args = parser.parse_args()
 
     if args.vision_feature_type == 'local':
@@ -109,6 +126,7 @@ def predict(
     temperature, 
     history, 
     sys_msg,
+    obj_list,
 ):
     prompt_text = generate_conversation_text(args, input, history, sys_msg)
     response = model.generate({
@@ -117,7 +135,8 @@ def predict(
         'top_p': top_p,
         'temperature': temperature,
         'max_tgt_len': max_length,
-        'modality_embeds': []
+        'modality_embeds': [],
+        'obj_list': obj_list,
     })
     history.append((input, response))
     return history
@@ -127,7 +146,8 @@ def default_response(args,
                     model,
                     input,
                     pcl_paths,
-                    sys_msg):
+                    sys_msg,
+                    obj_list):
     """get response text by default
 
     :param args args: input arguments
@@ -147,6 +167,7 @@ def default_response(args,
         temperature=1.0,
         history=[],
         sys_msg=sys_msg,
+        obj_list=obj_list,
     )
     response = history[-1][1]
     ans_list = []
@@ -185,29 +206,29 @@ def main(args):
     print(f'[!] init the LLM over ...')
     
     # load data
-    dataset_name = args.dataset_name
+    dataset_name = args.task_type
     inference_mode = args.inference_mode
     batch_size = args.bs
-    if dataset_name in single_infernce_dataset:
-        batch_size = 1
     dataloader = load_3Deval_dataset(
         args.base_data_path,
-        args.dataset_name,
+        args.task_type,
         inference_mode,
         batch_size = batch_size
     )
     sys_msg = dataloader.dataset.system_msg
-    task_name = dataloader.dataset.task_name
+    task_name = dataloader.dataset.task_type
 
-    answers_file_name = task_name + '_' + args.dataset_name + '.json'
+    answers_file_name = task_name + '.json'
     answers_file = os.path.join(args.answers_dir, answers_file_name)
     os.makedirs(os.path.dirname(answers_file), exist_ok=True)
-    
+    obj_lists = json.load(open("/media/kou/Data1/htc/LAMM/data/metadata/"+task_name+".json"))
     ans_list = []
     ans_file = open(os.path.splitext(answers_file)[0] + '.jsonl', 'w')
-    for data_item in tqdm(dataloader):
+    for index,data_item in enumerate(tqdm(dataloader)):
         prompt = data_item['query']
         pcl_paths = data_item['pcl']
+
+        obj_list=obj_lists[pcl_paths[0][37:-4]]
         
         if task_name == 'VQA':
             response_func = vqa_response
@@ -220,6 +241,7 @@ def main(args):
             input=prompt,
             pcl_paths=pcl_paths,
             sys_msg=sys_msg,
+            obj_list=obj_list
         )
 
         for id, output in zip(data_item['id'], answer_list):

@@ -19,16 +19,16 @@ def parser_args():
         help="the path that stores the data JSON",
     )
     parser.add_argument(
-        "--task_type", type=str, default='description', help="task type"
+        "--task_type", type=str, default='Detection', help="task type"
     )
     parser.add_argument(
         "--choose", type=bool, default=True, help="choose objects <= 12"
     )
     parser.add_argument(
-        "--vision_root_path", type=str, default='/media/kou/Data1/htc/LAMM/data', help="Root dir for images"
+        "--max_obj_len", type=int, default=12, help="Root dir for images"
     )
     parser.add_argument(
-        "--max_obj_len", type=int, default=12, help="Root dir for images"
+        "--vision_root_path", type=str, default='/media/kou/Data1/htc/LAMM/data', help="Root dir for images"
     )
     parser.add_argument(
         "--max_tgt_len",

@@ -10,22 +10,25 @@ common_dataset2task = {
     'ScanRefer': 'VG',
     'ScanQA': 'VQA',
     'ScanQA_multiplechoice': 'VQA',
+    '3DBench':'3DBench',
 }
 
 
 class LAMM_EVAL_3D(Dataset):
     def __init__(self, 
                  base_data_path,
-                 dataset_name,
+                 task_type,
                  mode = 'common',
                  load_data = False):
         assert mode in ['common', 'locating']
         self.base_data_path = base_data_path
-        self.dataset_name = dataset_name
-        if mode == 'common':
-            self.task_name = common_dataset2task[self.dataset_name]
-            self.system_msg = common_task2sysmsg[self.task_name + '3D']
-        json_path = os.path.join(base_data_path, 'meta_file', self.task_name + '_' + self.dataset_name + '.json')
+        self.task_type = task_type
+        # if mode == 'common':
+        #     self.task_name = common_dataset2task[self.dataset_name]
+        #     self.system_msg = common_task2sysmsg[self.task_name + '3D']
+        # self.task_name = common_dataset2task[self.dataset_name]
+        self.system_msg = common_task2sysmsg[self.task_type + '3D']
+        json_path = os.path.join(base_data_path, '3D_Benchmark/meta_file', self.task_type + '.json')
         self.data = json.load(open(json_path, 'rb'))
         self.load_data = load_data
     

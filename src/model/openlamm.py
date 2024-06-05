@@ -1,4 +1,5 @@
 import io
+import json
 import os
 import requests
 import torch
@@ -257,7 +258,7 @@ class LAMMPEFTModel(nn.Module):
         self.args = args
         self.max_obj_len = args["max_obj_len"]
         self.task_type = args["task_type"]
-        self.vision_type = args["vision_type"] if "vision_type" in args else "image"
+        self.vision_type = args["vision_type"] if "vision_type" in args else "pcl"
         encoder_pretrain = (
             args["encoder_pretrain"] if "encoder_pretrain" in args else "clip"
         )
@@ -309,7 +310,7 @@ class LAMMPEFTModel(nn.Module):
                 self.args["use_height"] if "use_height" in self.args else False
             )
             self.num_points = (
-                self.args["num_points"] if "num_points" in self.args else 40000
+                self.args["num_points"] if "num_points" in self.args else 200000
             )
 
             # Pointbert
@@ -442,6 +443,53 @@ class LAMMPEFTModel(nn.Module):
                 "Encoder pretrain [{}] not implemented".format(self.encoder_pretrain)
             )
 
+    def test_encode_pcl(self, pcl_paths, obj_list):
+        # load pcl data
+        inputs = self.load_and_transform_pcl_data(
+            pcl_paths, self.device
+        )  # bsz x 40000 x 3
+        inputs = inputs[0]
+        embeddings = []
+        for vision in obj_list:
+            x,y,z,width,length,height = np.array(vision["BoundingBox"])
+            # Finding points within the bbox
+            mask = np.stack((
+                inputs[:, 0] >= x - width / 2,
+                inputs[:, 0] <= x + width / 2,
+                inputs[:, 1] >= y - length / 2,
+                inputs[:, 1] <= y + length / 2,
+                inputs[:, 2] >= z - height / 2,
+                inputs[:, 2] <= z + height / 2), axis=0
+            )
+            mask = np.all(mask, axis=0)
+            # Applying the mask to extract points
+            cut_part = inputs[mask]
+            # # 可视化点云
+            # pcd = o3d.geometry.PointCloud()
+            # pcd.points = o3d.utility.Vector3dVector(cut_part)
+            # o3d.visualization.draw_geometries([pcd])
+            if len(cut_part)==0:
+                embeddings.append(torch.zeros(1,4096,dtype=self.llama_model.dtype).to(self.device))
+                continue
+            while (len(cut_part) < 8192):
+                newcut_part = cut_part+0.00001
+                cut_part = np.concatenate((cut_part, newcut_part), axis=0)
+                # cut_part = interpolate_points(cut_part)
+            cut_part = cut_part[np.random.choice(cut_part.shape[0], 8192, replace=False)]
+            with torch.no_grad():
+                if self.vision_feature_type == "global":
+                    raise NotImplementedError("Global feature not implemented for pcl")
+                elif self.vision_feature_type == "local":
+                    obj = torch.tensor(cut_part).to(self.llama_model.dtype).to(self.device)
+                    embedding = self.point_backbone(obj.unsqueeze(dim=0))
+                    embedding = self.llama_proj(embedding)
+                    embeddings.append(embedding)
+
+        atts_llama = torch.ones(embedding.size()[:-1], dtype=torch.long).to(
+            self.device
+        )  # bsz x 1/256
+        return embeddings, atts_llama
+
     def encode_pcl(self, pcl_paths):
         # load pcl data
         inputs = self.load_and_transform_pcl_data(
@@ -528,27 +576,13 @@ class LAMMPEFTModel(nn.Module):
             return None
         pcl_output = []
         for pcl_path in pcl_paths:
+            pcl_path = pcl_path[:-4] + '.ply'
             mesh_vertices = o3d.io.read_point_cloud(pcl_path)
             point_cloud = np.asarray(mesh_vertices.points)
-            # mesh_vertices = np.load(pcl_path)  # 150000, 3
-            # if not self.use_color:
-            #     point_cloud = mesh_vertices[:, 0:3]  # do not use color for now
-            # else:
-            #     point_cloud = mesh_vertices[:, 0:6]
-            #     point_cloud[:, 3:] = (point_cloud[:, 3:] - MEAN_COLOR_RGB) / 256.0
-            #
-            # if self.use_height:
-            #     floor_height = np.percentile(point_cloud[:, 2], 0.99)
-            #     height = point_cloud[:, 2] - floor_height
-            #     point_cloud = np.concatenate(
-            #         [point_cloud, np.expand_dims(height, 1)], 1
-            #     )
-
-            point_cloud, _ = random_sampling(
-                point_cloud, self.num_points, return_choices=True
-            )
-            pcl_output.append(torch.from_numpy(point_cloud))
-        return torch.stack(pcl_output, dim=0).to(device)  # bsz x num_points x 3
+            pcl_output.append(point_cloud)
+            # pcl_output.append(torch.from_numpy(point_cloud))
+        # return torch.stack(pcl_output, dim=0).to(device)  # bsz x num_points x 3
+        return pcl_output
 
     def prompt_wrap(
         self, img_embeds, input_ids, target_ids, attention_mask, use_system, task_type
@@ -735,7 +769,9 @@ class LAMMPEFTModel(nn.Module):
             image_embeds, _ = self.encode_image_object(inputs["images"])
             return image_embeds
         if "pcl_paths" in inputs and inputs["pcl_paths"]:
-            pcl_embeds, _ = self.encode_pcl(inputs["pcl_paths"])
+            # pcl_embeds, _ = self.encode_pcl(inputs["pcl_paths"])
+            pcl_embeds, _ = self.test_encode_pcl(inputs["pcl_paths"],inputs["obj_list"][:self.max_obj_len])
+            return pcl_embeds
             features.append(pcl_embeds)
         # TODO: Cautions HERE! Multimodality allowed in test ONLY!
         feature_embeds = (
@@ -758,7 +794,32 @@ class LAMMPEFTModel(nn.Module):
             feature_embeds = self.extract_multimodal_feature(inputs)
             inputs["modality_embeds"].append(feature_embeds)
 
-        batch_size = feature_embeds.shape[0]
+        class_gt = [classname["name"] for classname in inputs["obj_list"]]
+        class_box_gt = [classname["BoundingBox"] for classname in inputs["obj_list"]]
+        max_obj = self.max_obj_len
+        batch_input_ids, batch_target_ids,class_name_target_ids ,cur_class_name= [], [],[],[]
+        index = 0
+        for c,b in zip(class_gt[:max_obj],class_box_gt[:max_obj]):
+            class_name = c +str(b)+'!'
+            class_name = self.llama_tokenizer(class_name, add_special_tokens=False).input_ids
+            class_name_target_ids += [-100] * len(class_name)
+            batch_input_ids.append(torch.LongTensor(class_name))
+            index+=1
+        input_ids = rnn.pad_sequence(
+            batch_input_ids, batch_first=True, padding_value=self.llama_tokenizer.pad_token_id
+        )
+        input_ids = input_ids.to(self.device)
+        input_embeds = self.llama_model.model.embed_tokens(input_ids)
+
+        #插入vision embedings
+        vision_embeds_my = []
+        for index, vis in enumerate(feature_embeds):
+            vision_embeds_my.append(vis)
+            vision_embeds_my.append(input_embeds[index])
+        vision_embeds = torch.cat(vision_embeds_my).unsqueeze(dim=0)
+
+
+        batch_size = vision_embeds.shape[0]
         p_before = make_prompt_start(
             vision_type=self.vision_type
         )  # no system header in test
@@ -793,7 +854,7 @@ class LAMMPEFTModel(nn.Module):
         )  # bsz x 1 x embed_dim
 
         inputs_embeds = torch.cat(
-            [bos_embeds, p_before_embeds, feature_embeds, p_after_embeds], dim=1
+            [bos_embeds, p_before_embeds, vision_embeds, p_after_embeds], dim=1
         )  # bsz x (1+s1+NumVisionToken+s2) x embed_dim
 
         # p_after_embeds are on right, so the pads are right,

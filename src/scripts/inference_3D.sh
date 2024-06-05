@@ -25,4 +25,4 @@ python inference_3d.py \
     --base-data-path ${base_data_path} \
     --inference-mode common \
     --bs 1 \
-    --answers-dir ${answerdir}/${exp} \
+    --answers-dir ${answerdir}/${exp}
