@@ -1,5 +1,5 @@
 #!/bin/bash
-numgpu=2
+numgpu=1
 
 exp=$1
 dataname=$2
@@ -8,12 +8,11 @@ now=$(date +"%Y%m%d_%H%M%S")
 
 ckpt_dir=../ckpt
 mkdir -p ${ckpt_dir}/${exp}/log_rest/
-deepspeed --include localhost:3,4 --master_addr 127.0.0.1 --master_port 28451 train.py \
+deepspeed --include localhost:2 --master_addr 127.0.0.1 --master_port 28451 train.py \
     --stage 1 \
     --cfg /media/kou/Data1/htc/LAMM/src/config/train_ds3.yaml \
-    --data_path  /media/kou/Data3/htc/dataset/3D_Instruct/meta_file/Detection.json \
+    --data_path  /media/kou/Data1/htc/LAMM/data/meta_file/Classification.json \
     --vision_root_path /media/kou/Data1/htc/LAMM/data/3D_Instruct/ \
-    --task_type detection \
     --vision_type pcl \
     --use_system \
     --model lamm_peft \

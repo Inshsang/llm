@@ -27,8 +27,8 @@ class LAMM_EVAL_3D(Dataset):
         #     self.task_name = common_dataset2task[self.dataset_name]
         #     self.system_msg = common_task2sysmsg[self.task_name + '3D']
         # self.task_name = common_dataset2task[self.dataset_name]
-        self.system_msg = common_task2sysmsg[self.task_type + '3D']
-        json_path = os.path.join(base_data_path, 'meta_file', self.task_type + '.json')
+        self.system_msg = common_task2sysmsg[self.task_type]
+        json_path = os.path.join('/media/kou/Data1/htc/MYDATA/BenchMark/Task/Task_Reconstruct/Test', self.task_type + '.json')
         self.data = json.load(open(json_path, 'rb'))
         self.load_data = load_data
     

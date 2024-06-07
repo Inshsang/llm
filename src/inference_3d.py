@@ -14,13 +14,11 @@ answers_file = ''
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--task_type", type=str, default='Detection', help="task type"
+        "--task_type", type=str, default='Classification', help="task type"    #Detection,Counting,Classification,PositionRelation,VG,RoomDetection,Navigation
     )
+    # parser.add_argument("--dataset-name", default="detection")
     parser.add_argument(
         "--choose", type=bool, default=True, help="choose objects <= 12"
-    )
-    parser.add_argument(
-        "--max_obj_len", type=int, default=30, help="Root dir for images"
     )
     parser.add_argument('--model', type=str, default='lamm_peft')
     parser.add_argument(
@@ -46,7 +44,7 @@ def parse_args():
     parser.add_argument(
         "--delta_ckpt_path",
         type=str,
-        default="/media/kou/Data1/htc/LAMM/ckpt/--detectionenough/pytorch_model_ep8.pt",
+        default="/media/kou/Data1/htc/LAMM/ckpt/--Classification3d/pytorch_model_ep3.pt",
         help="path of delta parameters from previous stage; Only matter for stage 2",
     )
     parser.add_argument('--stage', type=int, default=2,)
@@ -60,11 +58,13 @@ def parse_args():
     parser.add_argument('--vision_output_layer', type=int, default=-2, choices=(-1, -2), help='the layer to output visual features; -1 means global from last layer')
     parser.add_argument('--num_vision_token', type=int, default=256) # the maximum sequence length
     # Test configurations
-    parser.add_argument('--max_tgt_len', type=int, default=2000, help="maximum length of target sequence at least 400; in case of 1 vision token")
+    parser.add_argument(
+        "--max_obj_len", type=int, default=20, help="Root dir for images"
+    )
+    parser.add_argument('--max_tgt_len', type=int, default=1200, help="maximum length of target sequence at least 400; in case of 1 vision token")
     parser.add_argument('--conv_mode', type=str, default='simple')
     parser.add_argument("--inference-mode", default='common')
     parser.add_argument("--bs", type=int,default=1)
-    parser.add_argument("--dataset-name", default="detection")
     parser.add_argument("--base-data-path", default="/media/kou/Data1/htc/LAMM/data")
     parser.add_argument("--answers-dir", default="../answers")
     # parser.add_argument("--dataset-name", required=True)
@@ -142,12 +142,12 @@ def predict(
     return history
 
 
-def default_response(args,
-                    model,
-                    input,
-                    pcl_paths,
-                    sys_msg,
-                    obj_list):
+def Class_response(args,
+                     model,
+                     input,
+                     pcl_paths,
+                     sys_msg,
+                     obj_lists):
     """get response text by default
 
     :param args args: input arguments
@@ -157,6 +157,7 @@ def default_response(args,
     :param str sys_msg: system message for test
     :return list: list of response
     """
+    pcl_paths[0] = "/media/kou/Data3/htc/Objects_npy/" + pcl_paths[0][39:]
     history = predict(
         args=args,
         model=model,
@@ -164,10 +165,45 @@ def default_response(args,
         pcl_paths=pcl_paths,
         max_length=args.max_tgt_len,
         top_p=0.9,
-        temperature=0.8,
+        temperature=0.7,
         history=[],
         sys_msg=sys_msg,
-        obj_list=obj_list,
+        obj_list=obj_lists,
+    )
+    response = history[-1][1]
+    ans_list = []
+
+    for res in response:
+        ans_list.append(res.split('###')[0])
+    return ans_list
+
+def Detection_response(args,
+                    model,
+                    input,
+                    pcl_paths,
+                    sys_msg,
+                    obj_lists):
+    """get response text by default
+
+    :param args args: input arguments
+    :param model model: model class
+    :param input input: input text
+    :param object pcl_paths: image objects
+    :param str sys_msg: system message for test
+    :return list: list of response
+    """
+    src_id = pcl_paths[0][37:-4]
+    history = predict(
+        args=args,
+        model=model,
+        input=input,
+        pcl_paths=pcl_paths,
+        max_length=args.max_tgt_len,
+        top_p=0.9,
+        temperature=0.7,
+        history=[],
+        sys_msg=sys_msg,
+        obj_list=obj_lists[src_id],
     )
     response = history[-1][1]
     ans_list = []
@@ -206,7 +242,7 @@ def main(args):
     print(f'[!] init the LLM over ...')
     
     # load data
-    dataset_name = args.task_type
+
     inference_mode = args.inference_mode
     batch_size = args.bs
     dataloader = load_3Deval_dataset(
@@ -221,19 +257,22 @@ def main(args):
     answers_file_name = task_name + '.json'
     answers_file = os.path.join(args.answers_dir, answers_file_name)
     os.makedirs(os.path.dirname(answers_file), exist_ok=True)
-    obj_lists = json.load(open("/media/kou/Data1/htc/LAMM/data/metadata/"+task_name+".json"))
+
+    if task_name == 'Detection':
+        obj_lists = json.load(open("/media/kou/Data1/htc/LAMM/data/metadata/"+task_name+".json"))
+    else:
+        obj_lists = [{'name':'Unknown','BoundingBox':[0,0,0,2,2,2]}]
+
     ans_list = []
     ans_file = open(os.path.splitext(answers_file)[0] + '.jsonl', 'w')
     for index,data_item in enumerate(tqdm(dataloader)):
         prompt = data_item['query']
         pcl_paths = data_item['pcl']
-
-        obj_list=obj_lists[pcl_paths[0][37:-4]]
         
-        if task_name == 'VQA':
-            response_func = vqa_response
+        if task_name == 'Detection':
+            response_func = Detection_response
         else:
-            response_func = default_response
+            response_func = Class_response
         
         answer_list = response_func(
             args=args,
@@ -241,7 +280,7 @@ def main(args):
             input=prompt,
             pcl_paths=pcl_paths,
             sys_msg=sys_msg,
-            obj_list=obj_list
+            obj_lists=obj_lists
         )
 
         for id, output in zip(data_item['id'], answer_list):

@@ -1,7 +1,6 @@
 from .agent import DeepSpeedAgent
 from .openlamm import LAMMPEFTModel
 
-
 def load_model(args):
     agent_name = args["models"][args["model"]]["agent_name"]
     model_name = args["models"][args["model"]]["model_name"]

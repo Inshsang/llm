@@ -89,18 +89,18 @@ VQA3D_QS = ""
 VQA3D_INS = ""
 
 common_task2sysmsg = {
-    'Detection': DETECTION_SYS,
+    # 'Detection': DETECTION_SYS,
     'Classification': CLASSIFICATION_SYS,
-    'VQA': VQA_SYS,
+    # 'VQA': VQA_SYS,
     'OCR': OCR_SYS,
     'Caption': CAPTION_SYS,
     'Counting': CNT_SYS,
     'Fine-grained_Classification': FG_CLASSIFICATION_SYS,
     'Facial_Classification': FFC_SYS,
     'Keypoints_Detection': KEYPOINTS_DET_SYS,
-    'Detection3D': DETECTION3D_SYS,
+    'Detection': DETECTION3D_SYS,
     'VG3D': VG3D_SYS,
-    'VQA3D': VQA3D_SYS
+    'VQA': VQA3D_SYS
 }
 
 locating_task2sysmsg = {

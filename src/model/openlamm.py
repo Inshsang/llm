@@ -54,6 +54,13 @@ def farthest_point_sample(point, npoint=8192):
     point = point[centroids.astype(np.int32)]
     return point
 
+def pc_normalize(pc):
+    centroid = np.mean(pc, axis=0)
+    pc = pc - centroid
+    m = np.max(np.sqrt(np.sum(pc**2, axis=1)))
+    pc = pc / m
+    return pc
+
 def cut_point_cloud(point_cloud, bbox_list):
     cut_parts = []
     for bbox in bbox_list:
@@ -257,7 +264,6 @@ class LAMMPEFTModel(nn.Module):
         super(LAMMPEFTModel, self).__init__()
         self.args = args
         self.max_obj_len = args["max_obj_len"]
-        self.task_type = args["task_type"]
         self.vision_type = args["vision_type"] if "vision_type" in args else "pcl"
         encoder_pretrain = (
             args["encoder_pretrain"] if "encoder_pretrain" in args else "clip"
@@ -274,7 +280,7 @@ class LAMMPEFTModel(nn.Module):
         vicuna_ckpt_path = args["vicuna_ckpt_path"]
 
         use_system = args["use_system"] if "use_system" in args else False
-        stage = args["stage"]
+        # stage = args["stage"]
 
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -576,10 +582,16 @@ class LAMMPEFTModel(nn.Module):
             return None
         pcl_output = []
         for pcl_path in pcl_paths:
-            pcl_path = pcl_path[:-4] + '.ply'
-            mesh_vertices = o3d.io.read_point_cloud(pcl_path)
-            point_cloud = np.asarray(mesh_vertices.points)
-            pcl_output.append(point_cloud)
+            if 'scene' in pcl_path:
+                pcl_path = pcl_path[:-4] + '.ply'
+                mesh_vertices = o3d.io.read_point_cloud(pcl_path)
+                point_cloud = np.asarray(mesh_vertices.points)
+                pcl_output.append(point_cloud)
+            else:
+                pcl_path = pcl_path[:-4] + '.npy'
+                point_cloud = np.load(pcl_path)[:,:3]
+                point_cloud = pc_normalize(point_cloud)
+                pcl_output.append(point_cloud)
             # pcl_output.append(torch.from_numpy(point_cloud))
         # return torch.stack(pcl_output, dim=0).to(device)  # bsz x num_points x 3
         return pcl_output
@@ -679,6 +691,29 @@ class LAMMPEFTModel(nn.Module):
         )  # bsz x (1 + s1 + num_image_tokens + s2)
         return inputs_embeds, targets, attention_mask
 
+    def catALL(self, detection_gt, max_obj, device,*args):
+        vis_embed_list = []
+        for i in detection_gt:
+            vis_embeds, _ = self.encode_obj_pcl(device, i[:max_obj])
+            vis_embeds = self.llama_proj(vis_embeds)
+            vis_embed_list.append(vis_embeds)
+        return vis_embed_list
+
+    def chooseOne(self, detection_gt, max_obj, device, vision_paths,obj_points, *args):
+        # vis_embed_list = []
+        # for classobj in vision_paths:
+        #     mesh_vertices = o3d.io.read_point_cloud(classobj)
+        #     point_cloud = np.asarray(mesh_vertices.points)
+        #     while (len(point_cloud) < 8192):
+        #         newcut_point_cloud = point_cloud + 0.00001
+        #         point_cloud = np.concatenate((point_cloud, newcut_point_cloud), axis=0)
+        #     point_cloud = point_cloud[np.random.choice(point_cloud.shape[0], 8192, replace=False)]
+        #     vis_embed_list.append(point_cloud)
+        vis_embed_list = obj_points
+        vis_embed_list, _ = self.encode_obj_pcl(device, vis_embed_list)
+        vis_embed_list = self.llama_proj(vis_embed_list)
+        return vis_embed_list
+
     def forward(self, inputs):
         # image_paths = inputs['image_paths']
         assert (
@@ -687,27 +722,34 @@ class LAMMPEFTModel(nn.Module):
         task_type = inputs["task_type"]
         vision_paths = inputs["vision_paths"]
         detection_gt = inputs["detection_gt"]
-        class_gt = inputs["class_gt"]
-        class_box_gt = inputs["class_box_gt"]
-        batch_size = len(vision_paths)
+        obj_points = inputs["obj_points"]
+        obj_class = inputs["obj_class"]
         max_obj = self.max_obj_len
 
-        vis_embed_list = []
-        for i in detection_gt:
-            vis_embeds,_ = self.encode_obj_pcl(self.device,i[:max_obj])
-            vis_embeds = self.llama_proj(vis_embeds)
-            vis_embed_list.append(vis_embeds)
+        options = {
+            "Detection3d":self.catALL,
+            "Classification3d":self.chooseOne
+        }
 
+        #处理vis_embed_list
+        if task_type[0] in options:
+            vis_embed_list = options[task_type[0]](detection_gt, max_obj, self.device,vision_paths,torch.stack(obj_points))
+        else:
+            vis_embed_list = []
+            print("Wrong task_type,choose one from [Detection,Counting,Class,PositionRelation,VG,RoomDetection,Navigation]")
 
-        class_feature = []
-        batch_input_ids, batch_target_ids,class_name_target_ids ,cur_class_name= [], [],[],[]
-        insertpos = len(class_gt[0][:max_obj])*[0]
+        #处理无bbox的情况
+        class_gt = inputs["class_gt"]
+        class_box_gt = inputs["class_box_gt"]
+        if task_type[0] == "Classification3d":
+            vis_embed_list = [vis_embed_list]
+            class_gt = [obj_class]
+            class_box_gt = [[[0,0,0,2,2,2]]]
+        batch_input_ids = []
         index = 0
-        for c,b,p in zip(class_gt[0][:max_obj],class_box_gt[0][:max_obj],vis_embed_list[0][:max_obj]):
+        for c,b in zip(class_gt[0][:max_obj],class_box_gt[0][:max_obj]):
             class_name = c +str(b)+'!'
             class_name = self.llama_tokenizer(class_name, add_special_tokens=False).input_ids
-            class_name_target_ids += [-100] * len(class_name)
-            insertpos[index] = len(class_name)
             batch_input_ids.append(torch.LongTensor(class_name))
             index+=1
         input_ids = rnn.pad_sequence(
@@ -792,7 +834,7 @@ class LAMMPEFTModel(nn.Module):
             feature_embeds = inputs["modality_embeds"][0]
         else:
             feature_embeds = self.extract_multimodal_feature(inputs)
-            inputs["modality_embeds"].append(feature_embeds)
+            #inputs["modality_embeds"].append(feature_embeds)
 
         class_gt = [classname["name"] for classname in inputs["obj_list"]]
         class_box_gt = [classname["BoundingBox"] for classname in inputs["obj_list"]]

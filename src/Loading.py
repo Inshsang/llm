@@ -34,12 +34,7 @@ class LAMM_EVAL_3D(Dataset):
         return len(self.data)
 
     def __getitem__(self, index):
-        index = list(self.data)[index]
         data_item = self.data[index]
-        # if index == 500:
-        #     data_item = "dada"
-        #     return data_item
-        # data_item = self.data[str(index)]
         if 'pcl' in data_item:
             data_item['pcl'] = os.path.join(self.base_data_path, data_item['pcl'])
         return data_item

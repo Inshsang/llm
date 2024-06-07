@@ -14,12 +14,10 @@ def parser_args():
         "--data_path",
         type=str,
         # default='/media/kou/Data1/htc/LAMM/data/LAMM_3dinstruct_10k.json',
-        default='/media/kou/Data3/htc/dataset/3D_Instruct/meta_file/Detection.json',
+        default='/media/kou/Data1/htc/MYDATA/BenchMark/Task/Task_Reconstruct/Train/Detection.json',
+        # default='/media/kou/Data1/htc/MYDATA/BenchMark/Task/Task_Reconstruct/Train/Classification.json',
         # required=True,
         help="the path that stores the data JSON",
-    )
-    parser.add_argument(
-        "--task_type", type=str, default='Detection', help="task type"
     )
     parser.add_argument(
         "--choose", type=bool, default=True, help="choose objects <= 12"

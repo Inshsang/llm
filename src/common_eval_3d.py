@@ -30,18 +30,21 @@ def Navigation(dataset, pred_data, thres=0.5):
 
     print(score / cnt)
 
-def grounding3d_eval(dataset, pred_data, thres=0.5):
+def grounding3d_eval(dataset, pred_data, thres=0.25):
     score = 0
     cnt = 0
+    scene_num = 0
     for gt, pred in tqdm(zip(dataset, pred_data), ncols=40):
-        gt_objects = gt
+        gt_objects = gt["object"]
         text = pred['text']
         points = parse_bbox_3d_Vis(text)
+        if len(gt_objects) > 10:
+            continue
         # if len(points) > 10:
         #     continue
         cnt += len(gt_objects)  # gt_objects,points
         for object_info in gt_objects:
-            if (not classification_acc(object_info['name'], text)) and (not (object_info['name'] in text)):
+            if (not classification_acc(object_info['name'].lower(), text.lower())) and (not (object_info['name'].lower() in text.lower())):
                 continue
             # if not (object_info['label'] in text):
             #     continue
@@ -51,17 +54,20 @@ def grounding3d_eval(dataset, pred_data, thres=0.5):
                 if iou > thres:
                     score += 1
                     break
-    print(score / cnt)
+        scene_num += 1
+    print(scene_num,score / cnt)
 
 
-# 直接对Detection专家检测
+#直接对Detection专家检测
 # def grounding3d_eval(dataset, pred_data, thres=0.5):
 #     score = 0
 #     cnt = 0
 #     metadata = json.load(open("/media/kou/Data1/htc/LAMM/data/metadata/Detection.json"))
 #     for gt, pred in tqdm(zip(dataset, metadata), ncols=40):
-#         gt_objects = gt
-#         text = metadata[pred]
+#         gt_objects = gt["object"]
+#         text = metadata[gt["id"]]
+#         if len(gt_objects) > 30:
+#             continue
 #         text_name = [i["name"] for i in text]
 #         # text = parse_bbox_3d_Vis(text)
 #         cnt += len(gt_objects)#gt_objects,points

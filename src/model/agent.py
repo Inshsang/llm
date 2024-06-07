@@ -1,6 +1,6 @@
 from header import *
 from torch.utils.tensorboard import SummaryWriter
-
+import torch
 
 class DeepSpeedAgent:
     def __init__(self, model, args):

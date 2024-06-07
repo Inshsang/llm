@@ -55,7 +55,7 @@ class_mapping = {
 class LAMMDataset(Dataset):
     """LAMM Dataset"""
 
-    def __init__(self, data_file_path: str, vision_root_path: str, choose: bool,vision_type="image"):
+    def __init__(self, data_file_path: str, vision_root_path: str, choose: bool, vision_type="pcl"):
         """Initialize supervised datasets
 
         :param str data_file_path: path of conversation file path
@@ -65,6 +65,7 @@ class LAMMDataset(Dataset):
         super(LAMMDataset, self).__init__()
         self.vision_type = vision_type
         self.choose = choose
+
         with open(data_file_path, "r") as fr:
             json_data = json.load(fr)
 
@@ -83,6 +84,11 @@ class LAMMDataset(Dataset):
             self.vision_path_list.append(one_vision_path)
             self.caption_list.append(one_caption)
             self.task_type_list.append(task_type)
+
+        with open("/media/kou/Data3/htc/dataset/Object/my_train_8192pts_fps.dat", 'rb') as f:
+            self.list_of_objpoints = pickle.load(f)
+        # self.list_of_class_name = json.load(open("/media/kou/Data3/htc/dataset/Object/my_train.json"))
+        self.num2name = json.load(open("/media/kou/Data3/htc/dataset/Object/my_names.json"))
 
         with open("/media/kou/Data3/htc/dataset/cut_scene_train.dat", 'rb') as f:
             self.detection_gt = pickle.load(f)
@@ -130,6 +136,8 @@ class LAMMDataset(Dataset):
             self.vision_path_list = [path for f, path in zip(self.choosen,self.vision_path_list) if f]
             self.caption_list = [caption for f, caption in zip(self.choosen, self.caption_list) if f]
             self.task_type_list = [task_type for f, task_type in zip(self.choosen, self.task_type_list) if f]
+            self.list_of_objpoints[0] = [points for f, points in zip(self.choosen, self.list_of_objpoints[0]) if f]
+            self.list_of_objpoints[1] = [points_label for f, points_label in zip(self.choosen, self.list_of_objpoints[1]) if f]
             self.class_gt = [c for i,c in zip(self.choosen,self.class_gt) if i]
         print(f"[!] collect {len(self.class_gt)} samples for training")
 
@@ -154,13 +162,15 @@ class LAMMDataset(Dataset):
             detection_gt = self.detection_gt[pos:pos+detection_gt_label],
             class_gt=class_gt,
             class_box_gt=class_box,
+            obj_points=torch.tensor(self.list_of_objpoints[0][i]),
+            obj_class=self.num2name[self.list_of_objpoints[1][i]],
         )
 
     def collate(self, instances):
         """collate function for dataloader"""
-        vision_paths, output_texts, task_type ,detection_gt,class_gt,class_box_gt= tuple(
+        vision_paths, output_texts, task_type ,detection_gt,class_gt,class_box_gt,obj_points,obj_class= tuple(
             [instance[key] for instance in instances]
-            for key in ("vision_paths", "output_texts", "task_type","detection_gt","class_gt","class_box_gt")
+            for key in ("vision_paths", "output_texts", "task_type","detection_gt","class_gt","class_box_gt","obj_points","obj_class")
         )
         return dict(
             vision_paths=vision_paths,
@@ -170,4 +180,6 @@ class LAMMDataset(Dataset):
             detection_gt=detection_gt,
             class_gt=class_gt,
             class_box_gt=class_box_gt,
+            obj_points=obj_points,
+            obj_class=obj_class,
         )
