@@ -1,6 +1,6 @@
 import argparse
 import os
-import json
+import json,jsonlines
 import numpy as np
 from utils import *
 from tqdm import tqdm
@@ -202,17 +202,22 @@ def VQAvisionacc(dataset,pred_data):
         res_1 = pattern_1.findall(pred_text)
         res_2 = pattern_2.findall(pred_text)
         res_3 = pattern_3.findall(pred_text)
-        if len(res_1) != 0:
-            if check_option(res_1, gt_char):
-                tmp_score = 1.0
-        elif len(res_2) != 0:
-            if check_pattern2(res_2, gt_char):
-                tmp_score = 1.0
-        elif len(res_3) != 0:
-            if check_option(res_3, gt_char):
-                tmp_score = 1.0
-        elif check_text(pred_text, gt['gt_choices'], gt_choice):
+        # if len(res_1) != 0:
+        #     if check_option(res_1, gt_char):
+        #         tmp_score = 1.0
+        # elif len(res_2) != 0:
+        #     if check_pattern2(res_2, gt_char):
+        #         tmp_score = 1.0
+        # elif len(res_3) != 0:
+        #     if check_option(res_3, gt_char):
+        #         tmp_score = 1.0
+        # elif check_text(pred_text, gt['gt_choices'], gt_choice):
+        #     tmp_score = 1.0
+        if check_text(pred_text, gt['gt_choices'], gt_choice):
             tmp_score = 1.0
+            # print(testnum ,":", gt["sentences"])
+            # print(pred['text'])
+            # print("####################################################")
         score += tmp_score
         testnum += 1
     print('vision: {}'.format(score / testnum))
@@ -337,7 +342,7 @@ dataset2evalfunc = {
     'ScanRefer': grounding3d,
     'ScanQA_multiplechoice': VQAvisionacc,
     'Counting': Counting,
-    'Class': VQAvisionacc,
+    'Classification': VQAvisionacc,
     'PositionRelation':Positoinacc,
     'VG':grounding3d,
     'Navigation':Navigation,
@@ -354,7 +359,7 @@ def collate_fn(batch):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset-name", default="Mydata")#Lamm,Mydata
-    parser.add_argument("--task-name", default="Detection")#Detection,Counting,Class,PositionRelation,VG,RoomDetection,Navigation
+    parser.add_argument("--task-name", default="Classification")#Detection,Counting,Class,PositionRelation,VG,RoomDetection,Navigation
     parser.add_argument('--answer-file', default=r"/media/kou/Data1/htc/LAMM/answers")
     parser.add_argument('--base-data-path', default=r"/media/kou/Data1/htc/MYDATA/BenchMark/Task/Task_Reconstruct/Test")
     args = parser.parse_args()
@@ -389,11 +394,16 @@ if __name__ == "__main__":
         with open(jonal, 'rb') as f:
             for item in jsonlines.Reader(f):
                 pred_data.append(item)
+    elif task_name == 'Classification':
+        file_ext = '.jsonl'
+        file_name = task_name  + file_ext
+        args.answer_file = os.path.join(args.answer_file, file_name)
+        pred_data = jsonlines.Reader(open(args.answer_file, 'rb'))
     elif args.answer_file.endswith('.json'):
         pred_data = json.load(open(args.answer_file,'rb'))
     else:
         file_ext = '.json'
-        file_name = task_name + '_' + dataset_name + file_ext
+        file_name = task_name  + file_ext
         args.answer_file = os.path.join(args.answer_file,task_name, file_name)
         pred_data = json.load(open(args.answer_file, 'rb'))
     print(f'Eval [{args.answer_file}] on {dataset_name}')

@@ -9,18 +9,21 @@ def parser_args():
     parser.add_argument(
         "--cfg", type=str, default="/media/kou/Data1/htc/LAMM/src/config/train_ds3.yaml", help="config file"
     )
+    parser.add_argument(
+        "--train_stage", type=int, default=2, help="1，2for obj alignment；3 for all"
+    )
     # data-related configurations
     parser.add_argument(
         "--data_path",
         type=str,
         # default='/media/kou/Data1/htc/LAMM/data/LAMM_3dinstruct_10k.json',
-        default='/media/kou/Data1/htc/MYDATA/BenchMark/Task/Task_Reconstruct/Train/Detection.json',
-        # default='/media/kou/Data1/htc/MYDATA/BenchMark/Task/Task_Reconstruct/Train/Classification.json',
+        # default='/media/kou/Data1/htc/MYDATA/BenchMark/Task/Task_Reconstruct/Train/Detection.json',
+        default='/media/kou/Data1/htc/MYDATA/BenchMark/Task/Task_Reconstruct/Train/Classification.json',
         # required=True,
         help="the path that stores the data JSON",
     )
     parser.add_argument(
-        "--choose", type=bool, default=True, help="choose objects <= 12"
+        "--choose", type=bool, default=False, help="choose objects <= 12"
     )
     parser.add_argument(
         "--max_obj_len", type=int, default=12, help="Root dir for images"
@@ -242,7 +245,7 @@ def main(**args):
     for epoch_i in tqdm(range(args["epochs"])):
         for batch in train_iter:
             agent.train_model(batch, current_step=current_step, pbar=pbar)
-            torch.cuda.empty_cache()
+            # torch.cuda.empty_cache()
             current_step += 1
         if (
                 epoch_i % max(args["epochs"] // 5, 1) == 0

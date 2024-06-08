@@ -120,10 +120,12 @@ class LAMMDataset(Dataset):
                         inclass_box.append(i['name'].lower())
                         inclass_class.append(i['BoundingBox'])
                 self.class_gt.append({id:inclass_box,'box':inclass_class})
+        self.choosen_num = len(self.detection_gt_label)
         if self.choose:
             choose_tensor = self.detection_gt_label <= 12
             numall = int(choose_tensor.sum())
             self.choosen = list(np.array(choose_tensor))
+            self.choosen_num = len(self.choosen)
             new_pos = numall*[None]
             p0, index = 0,0
             for f,p in zip(self.choosen,self.detection_gt_label):
@@ -146,14 +148,15 @@ class LAMMDataset(Dataset):
 
         :return int: length of dataset
         """
-        return len(self.class_gt)
+        return len(self.list_of_objpoints[0])
+
 
     def __getitem__(self, i):
         """get one sample"""
-        detection_gt_label = self.detection_gt_label[i]
-        pos = self.pos[i]
-        class_gt = list(self.class_gt[i].values())[0]
-        class_box = list(self.class_gt[i].values())[1]
+        detection_gt_label = self.detection_gt_label[i%self.choosen_num]
+        pos = self.pos[i%self.choosen_num]
+        class_gt = list(self.class_gt[i%self.choosen_num].values())[0]
+        class_box = list(self.class_gt[i%self.choosen_num].values())[1]
         return dict(
             vision_paths=self.vision_path_list[i],
             output_texts=self.caption_list[i],

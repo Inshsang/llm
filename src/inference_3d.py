@@ -1,7 +1,7 @@
 import os
 from model.openlamm import LAMMPEFTModel
 import torch
-import json
+import json,jsonlines
 import argparse
 from conversations import conv_templates
 from tqdm import tqdm
@@ -42,9 +42,12 @@ def parse_args():
         help="path of LLM, default: Vicuna",
     )
     parser.add_argument(
+        "--train_stage", type=int, default=2, help="1，2for obj alignment；3 for all"
+    )
+    parser.add_argument(
         "--delta_ckpt_path",
         type=str,
-        default="/media/kou/Data1/htc/LAMM/ckpt/--Classification3d/pytorch_model_ep3.pt",
+        default="/media/kou/Data1/htc/LAMM/ckpt/--Classification3d/fro_linear.pt",
         help="path of delta parameters from previous stage; Only matter for stage 2",
     )
     parser.add_argument('--stage', type=int, default=2,)
@@ -164,8 +167,8 @@ def Class_response(args,
         input=input,
         pcl_paths=pcl_paths,
         max_length=args.max_tgt_len,
-        top_p=0.9,
-        temperature=0.7,
+        top_p=0.6,
+        temperature=1,
         history=[],
         sys_msg=sys_msg,
         obj_list=obj_lists,
@@ -258,6 +261,11 @@ def main(args):
     answers_file = os.path.join(args.answers_dir, answers_file_name)
     os.makedirs(os.path.dirname(answers_file), exist_ok=True)
 
+    exist_list = []
+    existing = jsonlines.Reader(open("/media/kou/Data1/htc/LAMM/answers/Classification.jsonl"))
+    for e in existing:
+        exist_list.append(e["id"])
+
     if task_name == 'Detection':
         obj_lists = json.load(open("/media/kou/Data1/htc/LAMM/data/metadata/"+task_name+".json"))
     else:
@@ -266,6 +274,8 @@ def main(args):
     ans_list = []
     ans_file = open(os.path.splitext(answers_file)[0] + '.jsonl', 'w')
     for index,data_item in enumerate(tqdm(dataloader)):
+        if data_item["pcl"] in exist_list:
+            continue
         prompt = data_item['query']
         pcl_paths = data_item['pcl']
         
@@ -285,6 +295,7 @@ def main(args):
 
         for id, output in zip(data_item['id'], answer_list):
             ans_dict = {"id": id,
+                        "pcl": data_item['pcl'],
                         "text": output,
                         "delta_path": args.delta_ckpt_path
                         }

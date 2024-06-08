@@ -265,6 +265,7 @@ class LAMMPEFTModel(nn.Module):
         self.args = args
         self.max_obj_len = args["max_obj_len"]
         self.vision_type = args["vision_type"] if "vision_type" in args else "pcl"
+        self.train_stage = args["train_stage"]
         encoder_pretrain = (
             args["encoder_pretrain"] if "encoder_pretrain" in args else "clip"
         )
@@ -389,11 +390,31 @@ class LAMMPEFTModel(nn.Module):
         else:
             self.llama_model = LlamaForCausalLM.from_pretrained(vicuna_ckpt_path)
             self.llama_model = get_peft_model(self.llama_model, peft_config)
-            self.llama_model.print_trainable_parameters()
 
         self.llama_proj = nn.Linear(
             256, self.llama_model.config.hidden_size
         )
+
+        if self.train_stage == 1:
+            #冻结llm
+            for name, param in self.llama_model.named_parameters():
+                param.requires_grad = False
+            self.llama_model.print_trainable_parameters()
+            print("Froeze llama.")
+            # 加载保存的参数
+            llama_proj = torch.load('/media/kou/Data1/htc/LAMM/ckpt/llama_projcetion/llama_proj4.pth')
+            processed_llama = {key.replace("llama_proj.", ""): value for key, value in llama_proj.items()}
+            # 加载参数到llama_pro层
+            self.llama_proj.load_state_dict(processed_llama)
+        elif self.train_stage == 2:
+            # 加载保存的参数
+            llama_proj = torch.load('/media/kou/Data1/htc/LAMM/ckpt/llama_projcetion/llama_proj4.pth')
+            processed_llama = {key.replace("llama_proj.", ""): value for key, value in llama_proj.items()}
+            # 加载参数到llama_pro层
+            self.llama_proj.load_state_dict(processed_llama)
+            for name, param in self.llama_proj.named_parameters():
+                param.requires_grad = False
+            print("Froeze llama_proj.")
 
         self.llama_tokenizer = LlamaTokenizer.from_pretrained(
             vicuna_ckpt_path, use_fast=False
@@ -742,12 +763,13 @@ class LAMMPEFTModel(nn.Module):
         class_gt = inputs["class_gt"]
         class_box_gt = inputs["class_box_gt"]
         if task_type[0] == "Classification3d":
-            vis_embed_list = [vis_embed_list]
-            class_gt = [obj_class]
-            class_box_gt = [[[0,0,0,2,2,2]]]
+            vis_embed_list = vis_embed_list
+            class_gt = ['Unknown']*len(task_type)
+            # class_gt = [obj_class]
+            class_box_gt = [[0,0,0,2,2,2]]*len(task_type)
         batch_input_ids = []
         index = 0
-        for c,b in zip(class_gt[0][:max_obj],class_box_gt[0][:max_obj]):
+        for c,b in zip(class_gt[:max_obj],class_box_gt[:max_obj]):
             class_name = c +str(b)+'!'
             class_name = self.llama_tokenizer(class_name, add_special_tokens=False).input_ids
             batch_input_ids.append(torch.LongTensor(class_name))
@@ -760,10 +782,13 @@ class LAMMPEFTModel(nn.Module):
 
         #插入vision embedings
         vision_embeds_my = []
-        for index, vis in enumerate(vis_embed_list[0]):
-            vision_embeds_my.append(vis.unsqueeze(dim=0))
-            vision_embeds_my.append(input_embeds[index])
-        vision_embeds = torch.cat(vision_embeds_my).unsqueeze(dim=0)
+        for index, vis in enumerate(vis_embed_list):
+            vision_embeds_my_b = []
+            vision_embeds_my_b.append(vis.unsqueeze(dim=0))
+            vision_embeds_my_b.append(input_embeds[index])
+            vision_embeds_my.append(torch.cat(vision_embeds_my_b).unsqueeze(dim=0))
+
+        vision_embeds = torch.cat(vision_embeds_my)#.unsqueeze(dim=0)
 
         output_texts = inputs["output_texts"]
         input_ids, target_ids, attention_mask = process_batch_instance(
