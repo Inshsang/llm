@@ -10,7 +10,7 @@ def parser_args():
         "--cfg", type=str, default="/media/kou/Data1/htc/LAMM/src/config/train_ds3.yaml", help="config file"
     )
     parser.add_argument(
-        "--train_stage", type=int, default=2, help="1，2for obj alignment；3 for all"
+        "--train_stage", type=int, default=3, help="1，2for obj alignment；3 for all"
     )
     # data-related configurations
     parser.add_argument(

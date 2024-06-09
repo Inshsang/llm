@@ -38,9 +38,9 @@ lora_target_modules: ['q_proj', 'k_proj', 'v_proj', 'o_proj']
 
 # deepspeed arguments
 deepspeed:
-  train_batch_size: 128
+  train_batch_size: 64
   train_micro_batch_size_per_gpu: 8
-  gradient_accumulation_steps: 16
+  gradient_accumulation_steps: 8
   gradient_clipping: 1.0
   steps_per_print: 1
 

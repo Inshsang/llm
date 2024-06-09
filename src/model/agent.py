@@ -67,8 +67,8 @@ class DeepSpeedAgent:
             k for (k, v) in self.ds_engine.module.named_parameters() if v.requires_grad
         ]
 
-        # llm_proj = self.model.llama_proj.state_dict()
-        # torch.save(llm_proj, f'/media/kou/Data1/htc/LAMM/ckpt/llama_projcetion4_8/llama_proj{current_step}.pth')
+        llm_proj = self.model.llama_proj.state_dict()
+        torch.save(llm_proj, f'/media/kou/Data1/htc/LAMM/ckpt/llama_projcetion/llama_proj{current_step}.pth')
 
         # get state dict on Rank 0 (NOTE: state_dict is still none in other processes)
         state_dict = None

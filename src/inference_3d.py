@@ -7,7 +7,7 @@ from conversations import conv_templates
 from tqdm import tqdm
 from bigmodelvis import Visualization
 from datasets import load_3Deval_dataset
-
+import pickle
 answers_file = ''
 
 
@@ -47,7 +47,8 @@ def parse_args():
     parser.add_argument(
         "--delta_ckpt_path",
         type=str,
-        default="/media/kou/Data1/htc/LAMM/ckpt/--Classification3d/fro_linear.pt",
+        default="/media/kou/Data1/htc/LAMM/ckpt/--Classification3d/pytorch_full.pt",
+        # default="/media/kou/Data1/htc/LAMM/ckpt/llama_projcetion/llama_proj4.pth",
         help="path of delta parameters from previous stage; Only matter for stage 2",
     )
     parser.add_argument('--stage', type=int, default=2,)
@@ -130,6 +131,7 @@ def predict(
     history, 
     sys_msg,
     obj_list,
+    list_of_objpoints,
 ):
     prompt_text = generate_conversation_text(args, input, history, sys_msg)
     response = model.generate({
@@ -140,6 +142,7 @@ def predict(
         'max_tgt_len': max_length,
         'modality_embeds': [],
         'obj_list': obj_list,
+        'list_of_objpoints':list_of_objpoints,
     })
     history.append((input, response))
     return history
@@ -150,7 +153,8 @@ def Class_response(args,
                      input,
                      pcl_paths,
                      sys_msg,
-                     obj_lists):
+                     obj_lists,
+                     list_of_objpoints):
     """get response text by default
 
     :param args args: input arguments
@@ -166,12 +170,13 @@ def Class_response(args,
         model=model,
         input=input,
         pcl_paths=pcl_paths,
-        max_length=args.max_tgt_len,
-        top_p=0.6,
-        temperature=1,
+        max_length=20,
+        top_p=0.9,
+        temperature=0.9,
         history=[],
         sys_msg=sys_msg,
         obj_list=obj_lists,
+        list_of_objpoints=list_of_objpoints,
     )
     response = history[-1][1]
     ans_list = []
@@ -185,7 +190,8 @@ def Detection_response(args,
                     input,
                     pcl_paths,
                     sys_msg,
-                    obj_lists):
+                    obj_lists,
+                    list_of_objpoints):
     """get response text by default
 
     :param args args: input arguments
@@ -261,24 +267,31 @@ def main(args):
     answers_file = os.path.join(args.answers_dir, answers_file_name)
     os.makedirs(os.path.dirname(answers_file), exist_ok=True)
 
-    exist_list = []
-    existing = jsonlines.Reader(open("/media/kou/Data1/htc/LAMM/answers/Classification.jsonl"))
-    for e in existing:
-        exist_list.append(e["id"])
+    # exist_list = []
+    # existing = jsonlines.Reader(open("/media/kou/Data1/htc/LAMM/answers/Classification.jsonl"))
+    # for e in existing:
+    #     exist_list.append(e["pcl"][0])
+
+    with open("/media/kou/Data3/htc/dataset/Object/my_test_8192pts_fps.dat", 'rb') as f:
+        list_of_objpoints = pickle.load(f)
+    list_of_class_name = json.load(open("/media/kou/Data3/htc/dataset/Object/my_test.json"))
+    #删除只有一个点的物体
+    list_of_objpoints[0] = [npy for index, npy in enumerate(list_of_objpoints[0]) if index != 773]
+    list_of_objpoints[1] = [npy for index,npy in enumerate(list_of_objpoints[1]) if index!=773]
 
     if task_name == 'Detection':
-        obj_lists = json.load(open("/media/kou/Data1/htc/LAMM/data/metadata/"+task_name+".json"))
+        obj_lists = json.load(open("/media/kou/Data1/htc/LAMM/data/metadata/"+task_name+".json",'r'))
     else:
         obj_lists = [{'name':'Unknown','BoundingBox':[0,0,0,2,2,2]}]
 
     ans_list = []
     ans_file = open(os.path.splitext(answers_file)[0] + '.jsonl', 'w')
     for index,data_item in enumerate(tqdm(dataloader)):
-        if data_item["pcl"] in exist_list:
-            continue
+        # if data_item["pcl"][0] in exist_list:
+        #     continue
         prompt = data_item['query']
         pcl_paths = data_item['pcl']
-        
+
         if task_name == 'Detection':
             response_func = Detection_response
         else:
@@ -290,7 +303,8 @@ def main(args):
             input=prompt,
             pcl_paths=pcl_paths,
             sys_msg=sys_msg,
-            obj_lists=obj_lists
+            obj_lists=obj_lists,
+            list_of_objpoints = list_of_objpoints[0][index]
         )
 
         for id, output in zip(data_item['id'], answer_list):

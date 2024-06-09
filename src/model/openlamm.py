@@ -377,7 +377,9 @@ class LAMMPEFTModel(nn.Module):
             target_modules=self.args["lora_target_modules"],
         )
 
-        if args.get('use_lightllm', False):
+        if args.get('answers_dir', False):
+            self.llama_model = LlamaForCausalLM.from_pretrained(vicuna_ckpt_path)
+            self.llama_model = get_peft_model(self.llama_model, peft_config)
             pass
             # self.llama_model = LlamaLightForCausalLM(
             #     batch_size=self.args['bs'],
@@ -415,6 +417,22 @@ class LAMMPEFTModel(nn.Module):
             for name, param in self.llama_proj.named_parameters():
                 param.requires_grad = False
             print("Froeze llama_proj.")
+        elif self.train_stage == 3:
+            #冻结llm
+            for name, param in self.llama_model.named_parameters():
+                param.requires_grad = False
+            self.llama_model.print_trainable_parameters()
+
+            self.llama_proj = nn.Sequential(
+                # nn.Linear(self.trans_dim * 2, 256),
+                nn.ReLU(inplace=True),
+                nn.Dropout(0.5),
+                nn.Linear(256, self.llama_model.config.hidden_size)
+            )
+            # self.llama_proj = nn.Linear(
+            #     256, self.llama_model.config.hidden_size
+            # )
+            print("########################Initial llama_proj##########################")
 
         self.llama_tokenizer = LlamaTokenizer.from_pretrained(
             vicuna_ckpt_path, use_fast=False
@@ -470,7 +488,7 @@ class LAMMPEFTModel(nn.Module):
                 "Encoder pretrain [{}] not implemented".format(self.encoder_pretrain)
             )
 
-    def test_encode_pcl(self, pcl_paths, obj_list):
+    def test_encode_pcl(self, pcl_paths, obj_list,list_of_objpoints):
         # load pcl data
         inputs = self.load_and_transform_pcl_data(
             pcl_paths, self.device
@@ -495,14 +513,14 @@ class LAMMPEFTModel(nn.Module):
             # pcd = o3d.geometry.PointCloud()
             # pcd.points = o3d.utility.Vector3dVector(cut_part)
             # o3d.visualization.draw_geometries([pcd])
-            if len(cut_part)==0:
-                embeddings.append(torch.zeros(1,4096,dtype=self.llama_model.dtype).to(self.device))
-                continue
+            assert len(cut_part)!=0
             while (len(cut_part) < 8192):
                 newcut_part = cut_part+0.00001
                 cut_part = np.concatenate((cut_part, newcut_part), axis=0)
                 # cut_part = interpolate_points(cut_part)
             cut_part = cut_part[np.random.choice(cut_part.shape[0], 8192, replace=False)]
+            if 'Objects_npy' in pcl_paths[0]:
+                cut_part = list_of_objpoints
             with torch.no_grad():
                 if self.vision_feature_type == "global":
                     raise NotImplementedError("Global feature not implemented for pcl")
@@ -611,7 +629,6 @@ class LAMMPEFTModel(nn.Module):
             else:
                 pcl_path = pcl_path[:-4] + '.npy'
                 point_cloud = np.load(pcl_path)[:,:3]
-                point_cloud = pc_normalize(point_cloud)
                 pcl_output.append(point_cloud)
             # pcl_output.append(torch.from_numpy(point_cloud))
         # return torch.stack(pcl_output, dim=0).to(device)  # bsz x num_points x 3
@@ -765,8 +782,12 @@ class LAMMPEFTModel(nn.Module):
         if task_type[0] == "Classification3d":
             vis_embed_list = vis_embed_list
             class_gt = ['Unknown']*len(task_type)
-            # class_gt = [obj_class]
-            class_box_gt = [[0,0,0,2,2,2]]*len(task_type)
+            class_box_gt = [
+                [round(value, 2) for value in torch.mean(box, dim=0).tolist()] +  # xyz均值
+                [round(value, 2) for value in torch.max(torch.abs(box), dim=0).values.tolist()]  # wlh最大绝对值
+                for box in inputs['obj_points']
+            ]
+            # class_box_gt = [[0,0,0,2,2,2]]*len(task_type)
         batch_input_ids = []
         index = 0
         for c,b in zip(class_gt[:max_obj],class_box_gt[:max_obj]):
@@ -837,7 +858,7 @@ class LAMMPEFTModel(nn.Module):
             return image_embeds
         if "pcl_paths" in inputs and inputs["pcl_paths"]:
             # pcl_embeds, _ = self.encode_pcl(inputs["pcl_paths"])
-            pcl_embeds, _ = self.test_encode_pcl(inputs["pcl_paths"],inputs["obj_list"][:self.max_obj_len])
+            pcl_embeds, _ = self.test_encode_pcl(inputs["pcl_paths"],inputs["obj_list"][:self.max_obj_len],inputs['list_of_objpoints'])
             return pcl_embeds
             features.append(pcl_embeds)
         # TODO: Cautions HERE! Multimodality allowed in test ONLY!
@@ -862,7 +883,10 @@ class LAMMPEFTModel(nn.Module):
             #inputs["modality_embeds"].append(feature_embeds)
 
         class_gt = [classname["name"] for classname in inputs["obj_list"]]
-        class_box_gt = [classname["BoundingBox"] for classname in inputs["obj_list"]]
+        x,y,z = np.mean(inputs['list_of_objpoints'], axis=0)
+        w,l,h = np.max(np.abs(inputs['list_of_objpoints']), axis=0)
+        class_box_gt = [[round(x, 2),round(y, 2),round(z, 2),round(w, 2),round(l, 2),round(h, 2)]]
+        # class_box_gt = [classname["BoundingBox"] for classname in inputs["obj_list"]]
         max_obj = self.max_obj_len
         batch_input_ids, batch_target_ids,class_name_target_ids ,cur_class_name= [], [],[],[]
         index = 0
