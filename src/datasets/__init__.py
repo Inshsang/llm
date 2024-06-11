@@ -33,7 +33,7 @@ def load_lamm_dataset(args):
     dataloader = DataLoader(
         dataset,
         batch_sampler=batch_sampler,
-        num_workers=4,
+        num_workers=1,
         collate_fn=dataset.collate,
         pin_memory=True,
     )

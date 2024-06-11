@@ -10,7 +10,7 @@ def parser_args():
         "--cfg", type=str, default="/media/kou/Data1/htc/LAMM/src/config/train_ds3.yaml", help="config file"
     )
     parser.add_argument(
-        "--train_stage", type=int, default=3, help="1，2for obj alignment；3 for all"
+        "--train_stage", type=int, default=2, help="1，2for obj alignment；3 for all"
     )
     # data-related configurations
     parser.add_argument(
@@ -19,11 +19,12 @@ def parser_args():
         # default='/media/kou/Data1/htc/LAMM/data/LAMM_3dinstruct_10k.json',
         # default='/media/kou/Data1/htc/MYDATA/BenchMark/Task/Task_Reconstruct/Train/Detection.json',
         default='/media/kou/Data1/htc/MYDATA/BenchMark/Task/Task_Reconstruct/Train/Classification.json',
+        # default='/media/kou/Data1/htc/MYDATA/BenchMark/Task/Task_Reconstruct/Train/ClassificationLong.json',
         # required=True,
         help="the path that stores the data JSON",
     )
     parser.add_argument(
-        "--choose", type=bool, default=False, help="choose objects <= 12"
+        "--choose", type=bool, default=True, help="choose objects <= 12"
     )
     parser.add_argument(
         "--max_obj_len", type=int, default=12, help="Root dir for images"

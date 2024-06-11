@@ -85,33 +85,46 @@ class LAMMDataset(Dataset):
             self.caption_list.append(one_caption)
             self.task_type_list.append(task_type)
 
+        self.num2name = json.load(open("/media/kou/Data3/htc/dataset/Object/my_names.json"))
         with open("/media/kou/Data3/htc/dataset/Object/my_train_8192pts_fps.dat", 'rb') as f:
             self.list_of_objpoints = pickle.load(f)
-        # self.list_of_class_name = json.load(open("/media/kou/Data3/htc/dataset/Object/my_train.json"))
-        self.num2name = json.load(open("/media/kou/Data3/htc/dataset/Object/my_names.json"))
 
-        with open("/media/kou/Data3/htc/dataset/cut_scene_train.dat", 'rb') as f:
-            self.detection_gt = pickle.load(f)
-        self.detection_gt = torch.tensor(self.detection_gt)
+
+        # with open("/media/kou/Data3/htc/dataset/cut_scene_train.dat", 'rb') as f:
+        #     self.detection_gt = pickle.load(f)
+        # self.detection_gt = torch.tensor(self.detection_gt)
 
         with open("/media/kou/Data3/htc/dataset/cut_scene_train_label.dat", 'rb') as f:
-            self.detection_gt_label = pickle.load(f)
-        self.detection_gt_label = torch.tensor(self.detection_gt_label)
+            self.detection_gt_num = pickle.load(f)
+        self.detection_gt_num = torch.tensor(self.detection_gt_num)
+        num = torch.sum(self.detection_gt_num)
+        self.detection_gt = ["/media/kou/Data3/htc/Detection_obj/"+str(i)+".npy" for i in range(num)]
+        self.list_of_objpoints =[["/media/kou/Data3/htc/Objects_8192_npy/points/"+str(i)+".npy" for i in range(9500)],
+                                 ["/media/kou/Data3/htc/Objects_8192_npy/labels/"+str(i)+".npy" for i in range(9500)]]
+
+        self.map_class2points={self.vision_path_list[i]: "/media/kou/Data3/htc/Objects_8192_npy/points/"+str(i)+".npy"
+                          for i in range(len(self.vision_path_list))}
+        self.map_class2labels = {self.vision_path_list[i]: "/media/kou/Data3/htc/Objects_8192_npy/labels/" + str(i) + ".npy"
+                            for i in range(len(self.vision_path_list))}
+        self.map_scene2points=["/media/kou/Data3/htc/Objects_8192_npy/points/"+str(i)+".npy" for i in range(len(self.vision_path_list))]
+
         p0 = 0
         self.pos = []
-        for p in self.detection_gt_label:
+        for p in self.detection_gt_num:
             self.pos.append(int(p0))
             p0 += p
-        self.class_gt = []
+        self.scene_gt = {}
+        index = -1
         with open("/media/kou/Data1/htc/MYDATA/BenchMark/Task/GT/Detection.json", "r") as G:
             jsonlines_data = jsonlines.Reader(G)
             for lines in jsonlines_data:
                 id = next(iter(lines))
                 if int(id)<500 or int(id)>=10000:
                     continue
-
+                #增加单个场景物体
                 inclass_box = []
                 inclass_class = []
+                index += 1
                 bbox = lines[id]
                 for i in bbox:
                     if not len(i):
@@ -119,70 +132,69 @@ class LAMMDataset(Dataset):
                     if i['name'].lower() in class_mapping.keys():
                         inclass_box.append(i['name'].lower())
                         inclass_class.append(i['BoundingBox'])
-                self.class_gt.append({id:inclass_box,'box':inclass_class})
-        self.choosen_num = len(self.detection_gt_label)
-        if self.choose:
-            choose_tensor = self.detection_gt_label <= 12
-            numall = int(choose_tensor.sum())
-            self.choosen = list(np.array(choose_tensor))
-            self.choosen_num = len(self.choosen)
-            new_pos = numall*[None]
-            p0, index = 0,0
-            for f,p in zip(self.choosen,self.detection_gt_label):
-                if f:
-                    new_pos[index] = p0
-                    index += 1
-                p0 += int(p)
-            self.pos = new_pos
-            self.detection_gt_label = self.detection_gt_label[choose_tensor]
-            self.vision_path_list = [path for f, path in zip(self.choosen,self.vision_path_list) if f]
-            self.caption_list = [caption for f, caption in zip(self.choosen, self.caption_list) if f]
-            self.task_type_list = [task_type for f, task_type in zip(self.choosen, self.task_type_list) if f]
-            self.list_of_objpoints[0] = [points for f, points in zip(self.choosen, self.list_of_objpoints[0]) if f]
-            self.list_of_objpoints[1] = [points_label for f, points_label in zip(self.choosen, self.list_of_objpoints[1]) if f]
-            self.class_gt = [c for i,c in zip(self.choosen,self.class_gt) if i]
-        print(f"[!] collect {len(self.class_gt)} samples for training")
+                all_num = int(self.detection_gt_num[index])
+                start_num = self.pos[index]
+                inclass_points=self.detection_gt[start_num:start_num+all_num]
+                self.scene_gt[id] = {'classes':inclass_box,'boxes':inclass_class,'points':inclass_points}
+        # self.choosen_num = len(self.detection_gt_num)
+        # if self.choose:
+        #     choose_tensor = self.detection_gt_num <= 12
+        #     numall = int(choose_tensor.sum())
+        #     self.choosen = list(np.array(choose_tensor))
+        #     self.choosen_num = len(self.choosen)
+        #     new_pos = numall*[None]
+        #     p0, index = 0,0
+        #     for f,p in zip(self.choosen,self.detection_gt_num):
+        #         if f:
+        #             new_pos[index] = p0
+        #             index += 1
+        #         p0 += int(p)
+        #     self.pos = new_pos
+        #     self.detection_gt_label = self.detection_gt_num[choose_tensor]
+            # self.vision_path_list = [path for f, path in zip(self.choosen,self.vision_path_list) if f]
+            # self.caption_list = [caption for f, caption in zip(self.choosen, self.caption_list) if f]
+            # self.task_type_list = [task_type for f, task_type in zip(self.choosen, self.task_type_list) if f]
+            # self.list_of_objpoints[0] = [points for f, points in zip(self.choosen, self.list_of_objpoints[0]) if f]
+            # self.list_of_objpoints[1] = [points_label for f, points_label in zip(self.choosen, self.list_of_objpoints[1]) if f]
+            # self.scene_gt = [c for i,c in zip(self.choosen,self.scene_gt) if i]
+        print(f"[!] collect {len(self.vision_path_list)} samples for training")
 
     def __len__(self):
         """get dataset length
 
         :return int: length of dataset
         """
-        return len(self.list_of_objpoints[0])
+        return len(self.vision_path_list)
 
 
     def __getitem__(self, i):
         """get one sample"""
-        detection_gt_label = self.detection_gt_label[i%self.choosen_num]
-        pos = self.pos[i%self.choosen_num]
-        class_gt = list(self.class_gt[i%self.choosen_num].values())[0]
-        class_box = list(self.class_gt[i%self.choosen_num].values())[1]
+        if self.task_type_list[i] in ['Classification3d']:#Detection,Counting,'Classification3d',PositionRelation,VG,RoomDetection,Navigation
+            points_path = self.map_class2points[self.vision_path_list[i]]
+            label_path = self.map_class2labels[self.vision_path_list[i]]
+        else:
+            points_path = self.scene_gt[self.vision_path_list[i][37:-4]]
+            label_path = self.scene_gt[self.vision_path_list[i][37:-4]]['classes']
         return dict(
             vision_paths=self.vision_path_list[i],
             output_texts=self.caption_list[i],
             vision_type=self.vision_type,
             task_type=self.task_type_list[i],
-            detection_gt = self.detection_gt[pos:pos+detection_gt_label],
-            class_gt=class_gt,
-            class_box_gt=class_box,
-            obj_points=torch.tensor(self.list_of_objpoints[0][i]),
-            obj_class=self.num2name[self.list_of_objpoints[1][i]],
+            points_path = points_path,
+            label_path=label_path
         )
 
     def collate(self, instances):
         """collate function for dataloader"""
-        vision_paths, output_texts, task_type ,detection_gt,class_gt,class_box_gt,obj_points,obj_class= tuple(
+        vision_paths, output_texts, task_type ,points_path,label_path= tuple(
             [instance[key] for instance in instances]
-            for key in ("vision_paths", "output_texts", "task_type","detection_gt","class_gt","class_box_gt","obj_points","obj_class")
+            for key in ("vision_paths", "output_texts", "task_type","points_path","label_path")
         )
         return dict(
             vision_paths=vision_paths,
             output_texts=output_texts,
             vision_type=self.vision_type,
             task_type=task_type,
-            detection_gt=detection_gt,
-            class_gt=class_gt,
-            class_box_gt=class_box_gt,
-            obj_points=obj_points,
-            obj_class=obj_class,
+            points_path = points_path,
+            label_path=label_path
         )

@@ -47,7 +47,7 @@ def parse_args():
     parser.add_argument(
         "--delta_ckpt_path",
         type=str,
-        default="/media/kou/Data1/htc/LAMM/ckpt/--Classification3d/pytorch_full.pt",
+        default="/media/kou/Data1/htc/LAMM/ckpt/--Classification3d/more_linear.pt",
         # default="/media/kou/Data1/htc/LAMM/ckpt/llama_projcetion/llama_proj4.pth",
         help="path of delta parameters from previous stage; Only matter for stage 2",
     )

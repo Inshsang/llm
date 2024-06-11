@@ -217,7 +217,7 @@ lock = multiprocessing.Lock()
 
 # 创建线程池，限制最多10个线程
 from multiprocessing import Pool
-max_processes = 20
+max_processes = 1
 pool = Pool(processes=max_processes)
 
 num_jobs = len(detection_gt)  # 总共要执行的任务数
