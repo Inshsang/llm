@@ -153,19 +153,21 @@ class_mapping = {
 }
 
 detection_gt = []
+save_path = '/media/kou/Data1/htc/LAMM/data/cut_scene_500.dat'
+# save_path = '/media/kou/Data1/htc/LAMM/data/cut_scene_500_label.dat'
 # save_path = '/media/kou/Data1/htc/LAMM/data/cut_scene_test_label.dat'
 # save_path = '/media/kou/Data1/htc/LAMM/data/cut_scene_train_label.dat'
 # save_path = '/media/kou/Data1/htc/LAMM/data/cut_scene_test.dat'
-save_path = '/media/kou/Data1/htc/LAMM/data/cut_scene_train.dat'
+# save_path = '/media/kou/Data1/htc/LAMM/data/cut_scene_train.dat'
 
 with open("/media/kou/Data1/htc/MYDATA/BenchMark/Task/GT/Detection.json", "r") as G:
     jsonlines_data = jsonlines.Reader(G)
     for lines in jsonlines_data:
         id = next(iter(lines))
-        # if int(id) >= 500:
-        #     continue
-        if int(id) < 500 or int(id) >= 10000:
+        if int(id) >= 500:
             continue
+        # if int(id) < 500 or int(id) >= 10000:
+        #     continue
 
         inclass_box = []
         bbox = lines[id]
@@ -176,14 +178,14 @@ with open("/media/kou/Data1/htc/MYDATA/BenchMark/Task/GT/Detection.json", "r") a
                 inclass_box.append(i)
         detection_gt.append({'id': int(id), 'bbox': inclass_box})
 
-vision_path_list = []
-f = open("/media/kou/Data1/htc/LAMM/data/3D_Instruct/meta_file/Detection.json",'r')
-for item in json.load(f):
-    one_vision_path = item["pcl"][6:-4]
-    vision_path_list.append(one_vision_path)
+# vision_path_list = []
+# f = open("/media/kou/Data1/htc/LAMM/data/3D_Instruct/meta_file/Detection.json",'r')
+# for item in json.load(f):
+#     one_vision_path = item["pcl"][6:-4]
+#     vision_path_list.append(one_vision_path)
 
 
-label = np.load('/media/kou/Data1/htc/LAMM/data/cut_scene_train_label.dat',allow_pickle=True)
+label = np.load("/media/kou/Data3/htc/dataset/cut_scene_500_label.dat",allow_pickle=True)
 p0 = 0
 pos = []
 for p in label:
@@ -217,7 +219,7 @@ lock = multiprocessing.Lock()
 
 # 创建线程池，限制最多10个线程
 from multiprocessing import Pool
-max_processes = 1
+max_processes = 30
 pool = Pool(processes=max_processes)
 
 num_jobs = len(detection_gt)  # 总共要执行的任务数

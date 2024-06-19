@@ -14,11 +14,12 @@ answers_file = ''
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--task_type", type=str, default='Classification', help="task type"    #Detection,Counting,Classification,PositionRelation,VG,RoomDetection,Navigation
+        "--task_type", type=str, default='PositionRelation', help="task type" #Detection,Counting,Classification,PositionRelation,
+                                                                            # VG,RoomDetection,Navigation,
     )
     # parser.add_argument("--dataset-name", default="detection")
     parser.add_argument(
-        "--choose", type=bool, default=True, help="choose objects <= 12"
+        "--choose", type=bool, default=True, help="choose scene of objects <= 12"
     )
     parser.add_argument('--model', type=str, default='lamm_peft')
     parser.add_argument(
@@ -47,7 +48,7 @@ def parse_args():
     parser.add_argument(
         "--delta_ckpt_path",
         type=str,
-        default="/media/kou/Data1/htc/LAMM/ckpt/--Classification3d/more_linear.pt",
+        default="/media/kou/Data1/htc/LAMM/ckpt/--ALLV0/pytorch_model_ep2.pt",
         # default="/media/kou/Data1/htc/LAMM/ckpt/llama_projcetion/llama_proj4.pth",
         help="path of delta parameters from previous stage; Only matter for stage 2",
     )
@@ -132,6 +133,7 @@ def predict(
     sys_msg,
     obj_list,
     list_of_objpoints,
+    task_type,
 ):
     prompt_text = generate_conversation_text(args, input, history, sys_msg)
     response = model.generate({
@@ -143,6 +145,7 @@ def predict(
         'modality_embeds': [],
         'obj_list': obj_list,
         'list_of_objpoints':list_of_objpoints,
+        'task_type':task_type,
     })
     history.append((input, response))
     return history
@@ -171,12 +174,13 @@ def Class_response(args,
         input=input,
         pcl_paths=pcl_paths,
         max_length=20,
-        top_p=0.9,
-        temperature=0.9,
+        top_p=0.95,
+        temperature=0.8,
         history=[],
         sys_msg=sys_msg,
         obj_list=obj_lists,
         list_of_objpoints=list_of_objpoints,
+        task_type=args.task_type,
     )
     response = history[-1][1]
     ans_list = []
@@ -213,6 +217,8 @@ def Detection_response(args,
         history=[],
         sys_msg=sys_msg,
         obj_list=obj_lists[src_id],
+        list_of_objpoints=list_of_objpoints,
+        task_type=args.task_type,
     )
     response = history[-1][1]
     ans_list = []
@@ -279,10 +285,10 @@ def main(args):
     list_of_objpoints[0] = [npy for index, npy in enumerate(list_of_objpoints[0]) if index != 773]
     list_of_objpoints[1] = [npy for index,npy in enumerate(list_of_objpoints[1]) if index!=773]
 
-    if task_name == 'Detection':
-        obj_lists = json.load(open("/media/kou/Data1/htc/LAMM/data/metadata/"+task_name+".json",'r'))
-    else:
+    if task_name in ['Classification','DescriptionObj3d','ConversationObj3d']:
         obj_lists = [{'name':'Unknown','BoundingBox':[0,0,0,2,2,2]}]
+    else:
+        obj_lists = json.load(open("/media/kou/Data1/htc/LAMM/data/metadata/" + "Detection" + ".json", 'r'))
 
     ans_list = []
     ans_file = open(os.path.splitext(answers_file)[0] + '.jsonl', 'w')
@@ -294,8 +300,11 @@ def main(args):
 
         if task_name == 'Detection':
             response_func = Detection_response
-        else:
+        elif task_name in ['Classification','DescriptionObj3d','ConversationObj3d']:
+            # prompt = [data_item['query'][0]+" You must choose one option from A-F."]
             response_func = Class_response
+        else:
+            response_func = Detection_response
         
         answer_list = response_func(
             args=args,

@@ -94,18 +94,29 @@ class LAMMDataset(Dataset):
         #     self.detection_gt = pickle.load(f)
         # self.detection_gt = torch.tensor(self.detection_gt)
 
+        with open("/media/kou/Data3/htc/dataset/cut_scene_500_label.dat", 'rb') as f:
+            self.detection_gt_500_num = pickle.load(f)
         with open("/media/kou/Data3/htc/dataset/cut_scene_train_label.dat", 'rb') as f:
             self.detection_gt_num = pickle.load(f)
+
         self.detection_gt_num = torch.tensor(self.detection_gt_num)
+        self.detection_gt_500_num = torch.tensor(self.detection_gt_500_num)
         num = torch.sum(self.detection_gt_num)
+        num_500 = torch.sum(self.detection_gt_500_num)
         self.detection_gt = ["/media/kou/Data3/htc/Detection_obj/"+str(i)+".npy" for i in range(num)]
+        self.detection_gt_500 = ["/media/kou/Data3/htc/Detection_obj/" + str(i) + "_500.npy" for i in range(num_500)]
+
         self.list_of_objpoints =[["/media/kou/Data3/htc/Objects_8192_npy/points/"+str(i)+".npy" for i in range(9500)],
                                  ["/media/kou/Data3/htc/Objects_8192_npy/labels/"+str(i)+".npy" for i in range(9500)]]
 
-        self.map_class2points={self.vision_path_list[i]: "/media/kou/Data3/htc/Objects_8192_npy/points/"+str(i)+".npy"
-                          for i in range(len(self.vision_path_list))}
-        self.map_class2labels = {self.vision_path_list[i]: "/media/kou/Data3/htc/Objects_8192_npy/labels/" + str(i) + ".npy"
-                            for i in range(len(self.vision_path_list))}
+        # self.map_class2points={self.vision_path_list[i]: "/media/kou/Data3/htc/Objects_8192_npy/points/"+str(i)+".npy"
+        #                   for i in range(len(self.vision_path_list))}
+        # self.map_class2labels = {self.vision_path_list[i]: "/media/kou/Data3/htc/Objects_8192_npy/labels/" + str(i) + ".npy"
+        #                     for i in range(len(self.vision_path_list))}
+
+        class_map = json.load(open('/media/kou/Data1/htc/MYDATA/BenchMark/Task/Task_Reconstruct/Train/Classification.json'))
+        self.map_class2points = {vision_root_path+'/O'+class_map[i]['pcl'][1:]+".npy": "/media/kou/Data3/htc/Objects_8192_npy/points/" + str(i) + ".npy" for i in range(len(class_map))}
+        self.map_class2labels = {vision_root_path+'/O'+class_map[i]['pcl'][1:]+".npy": "/media/kou/Data3/htc/Objects_8192_npy/labels/" + str(i) + ".npy" for i in range(len(class_map))}
         self.map_scene2points=["/media/kou/Data3/htc/Objects_8192_npy/points/"+str(i)+".npy" for i in range(len(self.vision_path_list))]
 
         p0 = 0
@@ -113,29 +124,56 @@ class LAMMDataset(Dataset):
         for p in self.detection_gt_num:
             self.pos.append(int(p0))
             p0 += p
+        p0 = 0
+        self.pos_500 = []
+        for p in self.detection_gt_500_num:
+            self.pos_500.append(int(p0))
+            p0 += p
+
+
         self.scene_gt = {}
         index = -1
+        index_500 = -1
         with open("/media/kou/Data1/htc/MYDATA/BenchMark/Task/GT/Detection.json", "r") as G:
             jsonlines_data = jsonlines.Reader(G)
             for lines in jsonlines_data:
                 id = next(iter(lines))
-                if int(id)<500 or int(id)>=10000:
-                    continue
-                #增加单个场景物体
-                inclass_box = []
-                inclass_class = []
-                index += 1
-                bbox = lines[id]
-                for i in bbox:
-                    if not len(i):
-                        continue
-                    if i['name'].lower() in class_mapping.keys():
-                        inclass_box.append(i['name'].lower())
-                        inclass_class.append(i['BoundingBox'])
-                all_num = int(self.detection_gt_num[index])
-                start_num = self.pos[index]
-                inclass_points=self.detection_gt[start_num:start_num+all_num]
-                self.scene_gt[id] = {'classes':inclass_box,'boxes':inclass_class,'points':inclass_points}
+                # if int(id)<500 or int(id)>=10000:
+                #     continue
+                if int(id)<10000 and int(id) >= 500:
+                    #增加单个场景物体
+                    inclass_box = []
+                    inclass_class = []
+                    index += 1
+                    bbox = lines[id]
+                    for i in bbox:
+                        if not len(i):
+                            continue
+                        if i['name'].lower() in class_mapping.keys():
+                            inclass_box.append(i['name'].lower())
+                            inclass_class.append(i['BoundingBox'])
+                    all_num = int(self.detection_gt_num[index])
+                    start_num = self.pos[index]
+                    inclass_points=self.detection_gt[start_num:start_num+all_num]
+                    self.scene_gt[id] = {'classes':inclass_box,'boxes':inclass_class,'points':inclass_points}
+
+                if int(id) < 500:
+                    #增加单个场景物体
+                    inclass_box = []
+                    inclass_class = []
+                    index_500 += 1
+                    bbox = lines[id]
+                    for i in bbox:
+                        if not len(i):
+                            continue
+                        if i['name'].lower() in class_mapping.keys():
+                            inclass_box.append(i['name'].lower())
+                            inclass_class.append(i['BoundingBox'])
+                    all_num = int(self.detection_gt_500_num[index_500])
+                    start_num = self.pos_500[index_500]
+                    inclass_points=self.detection_gt_500[start_num:start_num+all_num]
+                    self.scene_gt[id] = {'classes':inclass_box,'boxes':inclass_class,'points':inclass_points}
+
         # self.choosen_num = len(self.detection_gt_num)
         # if self.choose:
         #     choose_tensor = self.detection_gt_num <= 12
@@ -170,6 +208,9 @@ class LAMMDataset(Dataset):
     def __getitem__(self, i):
         """get one sample"""
         if self.task_type_list[i] in ['Classification3d']:#Detection,Counting,'Classification3d',PositionRelation,VG,RoomDetection,Navigation
+            points_path = self.map_class2points[self.vision_path_list[i]]
+            label_path = self.map_class2labels[self.vision_path_list[i]]
+        elif self.task_type_list[i] in ['DescriptionObj3d','ConversationObj3d']:
             points_path = self.map_class2points[self.vision_path_list[i]]
             label_path = self.map_class2labels[self.vision_path_list[i]]
         else:

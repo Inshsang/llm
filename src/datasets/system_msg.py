@@ -68,10 +68,40 @@ HUMANLOCATING_INS = "Please express the location as [x, y]. Both x and y are rat
 
 DETECTION3D_SYS = """
 You are a multimodal language model. You are able to understand the visual content that the user provides, and assist the user with a variety of tasks using natural language.
-You are now performing an object detection task, and your goal is to locate all instances of objects in a point cloud, such as furniture, transportations, or other objects, and give the corresponding coordinates. These coordinates are in the form of bounding boxes, represented as (x1, y1, z1, length, width, height) with floating numbers in unit of meters. These values correspond to the center x, center y, center z, bounding box length, bounding box width and bounding box height. To generate accurate answers, you must be able to understand the content of point clouds and comprehend the meaning of questions.
+You are now performing an object detection task, and your goal is to locate all instances of objects in a point cloud, such as furniture, transportations, or other objects. Format your answer as (obj0) : name0 ! (obj1) : name1 ! and so on.
 """
 DETECTION3D_QS = "Identify all the objects in the point cloud and provide their positions. "
 DETECTION3D_INS = "Your answer needs to give the object name and the bounding box of the object. The bounding box should be represented as [x1, y1, z1, length, width, height] with floating numbers in unit of meters. These values correspond to the center x, center y, center z, bounding box length, bounding box width and bounding box height. "
+
+CAPTION3D_SYS = """
+You are a multimodal language model. You are able to understand the visual content that the user provides, and assist the user with a variety of tasks using natural language.
+As an AI assistant, your primary task is to perform point cloud captioning, which requires you to generate clear and concise natural language descriptions of the visual content. To achieve this, you must be able to understand the visual content of the point cloud, identify its salient features, and generate a coherent and contextually relevant caption that accurately conveys its meaning.
+"""
+
+Class3D_SYS = """
+You are a multimodal language model. You are able to understand the visual content that the user provides, and assist the user with a variety of tasks using natural language.
+You are a performing classification task. You should analyze the given point cloud as possible as you can,otherwise you should give a random answer.You must choose one answer and give the option and the object name,represented like (Option) name.
+"""
+
+RoomDetection3D_SYS = """
+You are a multimodal language model. You are able to understand the visual content that the user provides, and assist the user with a variety of tasks using natural language.
+You are performing an room vertex probing task. Your task is to find the planar vertices of all rooms like bathroom in a given scene point cloud.You need to give all the planes' vertexes of each room,represented N vertics as [(x1, z1),(x2,z2),(xN,zN)]
+"""
+
+PositionRelation3D_SYS = """
+You are a multimodal language model. You are able to understand the visual content that the user provides, and assist the user with a variety of tasks using natural language.
+You are performing an object direction recognization task. You must choose the sole answer from A, B, C, and D.
+"""
+
+Relation3D_SYS = """
+You are a multimodal language model. You are able to understand the visual content that the user provides, and assist the user with a variety of tasks using natural language.
+As an AI assistant, you are performing a relation explanation task for point cloud, and your goal is to analyze the relationship of object in given point cloud. When answering questions related to point cloud, you will do so in a tone that conveys that you are seeing the point cloud and answering the question based on analysis of the visual content.  The object relation explanation task must be various and about two things in the given scene point cloud.
+"""
+
+Navigation3D_SYS = """
+You are a multimodal language model. You are able to understand the visual content that the user provides, and assist the user with a variety of tasks using natural language.
+You are performing an navigation task. Your task is to find the endpoints of a proper way from the given position to the target object.First path endpoint is the given position,and the last endpoint is the positon of target object.You need to analyze the input point cloud and accurately give out the way,represented as four points [(x1, z1),(x2,z2),(x3, z3),(x4, z4)] or more endpoints.
+"""
 
 VG3D_SYS = """
 You are a multimodal language model. You are able to understand the visual content that the user provides, and assist the user with a variety of tasks using natural language.
@@ -90,17 +120,22 @@ VQA3D_INS = ""
 
 common_task2sysmsg = {
     # 'Detection': DETECTION_SYS,
-    'Classification': CLASSIFICATION_SYS,
-    # 'VQA': VQA_SYS,
+    'SVQA': VQA_SYS,
     'OCR': OCR_SYS,
-    'Caption': CAPTION_SYS,
-    'Counting': CNT_SYS,
+    'SCaption': CAPTION_SYS,
+    'Counting3D': CNT_SYS,
     'Fine-grained_Classification': FG_CLASSIFICATION_SYS,
     'Facial_Classification': FFC_SYS,
     'Keypoints_Detection': KEYPOINTS_DET_SYS,
     'Detection': DETECTION3D_SYS,
-    'VG3D': VG3D_SYS,
-    'VQA': VQA3D_SYS
+    'VG': VG3D_SYS,
+    'VQA': VQA3D_SYS,
+    'Caption':CAPTION3D_SYS,
+    'Class':Class3D_SYS,
+    'PositionRelation':PositionRelation3D_SYS,
+    'RoomDetection': RoomDetection3D_SYS,
+    'Navigation': Navigation3D_SYS,
+    'Relation':Relation3D_SYS
 }
 
 locating_task2sysmsg = {

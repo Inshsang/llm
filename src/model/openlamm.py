@@ -393,6 +393,7 @@ class LAMMPEFTModel(nn.Module):
             self.llama_model = LlamaForCausalLM.from_pretrained(vicuna_ckpt_path)
             self.llama_model = get_peft_model(self.llama_model, peft_config)
 
+        # self.llama_proj = nn.Linear(256, self.llama_model.config.hidden_size)
         self.llama_proj = nn.Sequential(
             # nn.Linear(self.trans_dim * 2, 256),
             nn.ReLU(inplace=True),
@@ -422,6 +423,7 @@ class LAMMPEFTModel(nn.Module):
             self.llama_proj.load_state_dict(processed_llama)
             for name, param in self.llama_proj.named_parameters():
                 param.requires_grad = False
+            self.llama_proj.eval()
             print("Froeze llama_proj.")
         elif self.train_stage == 3:
             #冻结llm
@@ -519,14 +521,17 @@ class LAMMPEFTModel(nn.Module):
             # pcd = o3d.geometry.PointCloud()
             # pcd.points = o3d.utility.Vector3dVector(cut_part)
             # o3d.visualization.draw_geometries([pcd])
-            assert len(cut_part)!=0
+            if 'Objects_npy' in pcl_paths[0]:
+                cut_part = list_of_objpoints
+            if len(cut_part)==0:
+                # print("One empyt object")
+                cut_part = inputs
             while (len(cut_part) < 8192):
                 newcut_part = cut_part+0.00001
                 cut_part = np.concatenate((cut_part, newcut_part), axis=0)
                 # cut_part = interpolate_points(cut_part)
             cut_part = cut_part[np.random.choice(cut_part.shape[0], 8192, replace=False)]
-            if 'Objects_npy' in pcl_paths[0]:
-                cut_part = list_of_objpoints
+
             with torch.no_grad():
                 if self.vision_feature_type == "global":
                     raise NotImplementedError("Global feature not implemented for pcl")
@@ -772,11 +777,12 @@ class LAMMPEFTModel(nn.Module):
         vis_embed_list,class_box_gt = [],[]
         points_path = points_path[0]
         #处理vis_embed_list,scene
-        if task_type[0] in ['Classification3d']:
+        if task_type[0] in ['Classification3d','DescriptionObj3d','ConversationObj3d']:
             obj_numpy = np.load(points_path)
             x, y, z = np.mean(obj_numpy, axis=0)
             w, l, h = np.max(np.abs(obj_numpy), axis=0)
-            class_box_gt = [[round(x, 2), round(y, 2), round(z, 2), round(w, 2), round(l, 2), round(h, 2)]]
+            class_box_gt = [[round(x, 1), round(y, 1), round(z, 1)]]
+            # class_box_gt = [[round(x, 2), round(y, 2), round(z, 2), round(w, 2), round(l, 2), round(h, 2)]]
 
             # class_embed = np.load(points_path)
             class_embed, _ = self.encode_obj_pcl(self.device, [obj_numpy])
@@ -789,7 +795,8 @@ class LAMMPEFTModel(nn.Module):
                 vis_numpy_list.append(obj_numpy)
                 x, y, z = np.mean(obj_numpy, axis=0)
                 w, l, h = np.max(np.abs(obj_numpy), axis=0)
-                class_box_gt.append([round(x, 2), round(y, 2), round(z, 2), round(w, 2), round(l, 2), round(h, 2)])
+                # class_box_gt.append([round(x, 2), round(y, 2), round(z, 2), round(w, 2), round(l, 2), round(h, 2)])
+                class_box_gt.append([round(x, 1), round(y, 1), round(z, 1)])
             vis_embeds, _ = self.encode_obj_pcl(self.device, vis_numpy_list[:max_obj])
             vis_embeds = self.llama_proj(vis_embeds)
             vis_embed_list = vis_embeds
@@ -825,8 +832,8 @@ class LAMMPEFTModel(nn.Module):
         #处理无bbox的情况
 
         batch_input_ids = []
-        for b in class_box_gt[:max_obj]:
-            class_name = str(b)+'!'
+        for index,b in enumerate(class_box_gt[:max_obj]):
+            class_name = 'obj'+str(index)+str(b)+'!'
             class_name = self.llama_tokenizer(class_name, add_special_tokens=False).input_ids
             batch_input_ids.append(torch.LongTensor(class_name))
 
@@ -917,20 +924,26 @@ class LAMMPEFTModel(nn.Module):
             feature_embeds = self.extract_multimodal_feature(inputs)
             #inputs["modality_embeds"].append(feature_embeds)
 
-        class_gt = [classname["name"] for classname in inputs["obj_list"]]
-        x,y,z = np.mean(inputs['list_of_objpoints'], axis=0)
-        w,l,h = np.max(np.abs(inputs['list_of_objpoints']), axis=0)
-        class_box_gt = [[round(x, 2),round(y, 2),round(z, 2),round(w, 2),round(l, 2),round(h, 2)]]
-        # class_box_gt = [classname["BoundingBox"] for classname in inputs["obj_list"]]
+
+        if inputs["task_type"] in ["Classification",'DescriptionObj3d','ConversationObj3d']:
+            x,y,z = np.mean(inputs['list_of_objpoints'], axis=0)
+            class_box_gt = [[round(x, 1), round(y, 1), round(z, 1)]]
+            w,l,h = np.max(np.abs(inputs['list_of_objpoints']), axis=0)
+        # class_box_gt = [[round(x, 2),round(y, 2),round(z, 2),round(w, 2),round(l, 2),round(h, 2)]]
+        else:
+            class_list = [classname["name"] for classname in inputs["obj_list"]]
+            class_box_gt = [[round(classname['BoundingBox'][0], 1),round(classname['BoundingBox'][1], 1),round(classname['BoundingBox'][2], 1)] for classname in inputs["obj_list"]]
+
         max_obj = self.max_obj_len
-        batch_input_ids, batch_target_ids,class_name_target_ids ,cur_class_name= [], [],[],[]
-        index = 0
-        for c,b in zip(class_gt[:max_obj],class_box_gt[:max_obj]):
-            class_name = c +str(b)+'!'
+        batch_input_ids,class_name_target_ids = [],[]
+
+        for index,b in enumerate(class_box_gt[:max_obj]):
+        #     class_name = 'obj'+str(index)+str(b)+'!'
+            class_name = str(b)+'!'
             class_name = self.llama_tokenizer(class_name, add_special_tokens=False).input_ids
             class_name_target_ids += [-100] * len(class_name)
             batch_input_ids.append(torch.LongTensor(class_name))
-            index+=1
+
         input_ids = rnn.pad_sequence(
             batch_input_ids, batch_first=True, padding_value=self.llama_tokenizer.pad_token_id
         )

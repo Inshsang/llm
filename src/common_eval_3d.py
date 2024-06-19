@@ -1,5 +1,5 @@
 import argparse
-import os
+import os,re
 import json,jsonlines
 import numpy as np
 from utils import *
@@ -30,32 +30,65 @@ def Navigation(dataset, pred_data, thres=0.5):
 
     print(score / cnt)
 
+#多目标分类
 def grounding3d_eval(dataset, pred_data, thres=0.25):
     score = 0
     cnt = 0
     scene_num = 0
+    Pred = json.load(open("/media/kou/Data1/htc/LAMM/data/metadata/Detection.json"))
     for gt, pred in tqdm(zip(dataset, pred_data), ncols=40):
         gt_objects = gt["object"]
         text = pred['text']
-        points = parse_bbox_3d_Vis(text)
-        if len(gt_objects) > 10:
-            continue
-        # if len(points) > 10:
+        object_names = re.findall(r': (\w+)!', text)
+        # if len(gt_objects) > 5:
         #     continue
-        cnt += len(gt_objects)  # gt_objects,points
-        for object_info in gt_objects:
-            if (not classification_acc(object_info['name'].lower(), text.lower())) and (not (object_info['name'].lower() in text.lower())):
-                continue
-            # if not (object_info['label'] in text):
-            #     continue
-            for index, point in enumerate(points):
-                # iou = cal_iou_3d(object_info['bbox'], point)
-                iou = cal_aro_3d(object_info['BoundingBox'], point)
-                if iou > thres:
-                    score += 1
-                    break
+        assert gt["id"] == pred["id"]
+        preding = Pred[gt["id"]]
+        pred_name = [i['name'] for i in preding]
+        gt_name = [i['name'] for i in gt_objects]
+        pred_box = [i['BoundingBox'] for i in preding]
+        cnt += len(pred_box)  # gt_objects,pred_box
+        for pred,obj in zip(pred_name,object_names):
+            if pred==obj:
+                score += 1
+                break
+        # for gt_info in gt_objects:
+        #     if gt_info['name'] in pred_name and gt_info['name'] in object_names:
+        #         class_box = [b for i,b in zip(pred_name,pred_box) if i == gt_info['name']]
+        #         for index, point in enumerate(class_box):
+        #             iou = cal_aro_3d(gt_info['BoundingBox'], point)
+        #             if iou > thres:
+        #                 score += 1
+        #                 break
         scene_num += 1
-    print(scene_num,score / cnt)
+        print(scene_num,score / cnt)
+
+# def grounding3d_eval(dataset, pred_data, thres=0.25):
+#     score = 0
+#     cnt = 0
+#     scene_num = 0
+#     for gt, pred in tqdm(zip(dataset, pred_data), ncols=40):
+#         gt_objects = gt["object"]
+#         text = pred['text']
+#         points = parse_bbox_3d_Vis(text)
+#         if len(gt_objects) > 10:
+#             continue
+#         # if len(points) > 10:
+#         #     continue
+#         cnt += len(points)  # gt_objects,points
+#         for object_info in gt_objects:
+#             if (not classification_acc(object_info['name'].lower(), text.lower())) and (not (object_info['name'].lower() in text.lower())):
+#                 continue
+#             # if not (object_info['label'] in text):
+#             #     continue
+#             for index, point in enumerate(points):
+#                 # iou = cal_iou_3d(object_info['bbox'], point)
+#                 iou = cal_aro_3d(object_info['BoundingBox'], point)
+#                 if iou > thres:
+#                     score += 1
+#                     break
+#         scene_num += 1
+#     print(scene_num,score / cnt)
 
 
 #直接对Detection专家检测
@@ -70,7 +103,7 @@ def grounding3d_eval(dataset, pred_data, thres=0.25):
 #             continue
 #         text_name = [i["name"] for i in text]
 #         # text = parse_bbox_3d_Vis(text)
-#         cnt += len(gt_objects)#gt_objects,points
+#         cnt += len(points)#gt_objects,points
 #         for object_info in gt_objects:
 #             if not (object_info['name'].lower() in text_name):
 #                 continue
@@ -118,7 +151,7 @@ def Rgrounding3d_eval(dataset, pred_data, thres=0.5):
         gt_objects = gt['object']
         text = pred['text']
         bboxes = parse_bbox_3d_Vis(text)
-        cnt += len(gt_objects)#gt_objects,bboxes
+        cnt += len(bboxes)#gt_objects,bboxes
         # for object_info in gt_objects:
         # if not classification_acc(gt_objects['label'], text):
         #     continue
@@ -228,7 +261,6 @@ def Positoinacc(dataset,pred_data):
     pattern_2 = re.compile(r'\([A-D]\)')
     pattern_3 = re.compile(r'[A-D]')
 
-
     def check_text(text, choices, gt_id):
         text = text.lower()
         if choices[gt_id].lower() not in text:
@@ -272,12 +304,6 @@ def Positoinacc(dataset,pred_data):
                 tmp_score = 1.0
         elif check_text(pred_text, gt['gt_choices'], gt_choice):
             tmp_score = 1.0
-        else :
-            Addition = {'0':"A",'1':"B",'2':"C",'3':"D"}
-            choice = random.randint(0,3)
-            choice = Addition[str(choice)]
-            if check_option(choice, gt_char):
-                tmp_score = 1.0
 
         score += tmp_score
         testnum += 1
@@ -331,6 +357,8 @@ def Counting(dataset,pred_data):
         elif len(res_3) != 0:
             if check_option(res_3, gt_char):
                 tmp_score = 1.0
+        # elif check_text(pred_text, gt['gt_choices'], gt_choice):
+        #     tmp_score = 1.0
         elif check_text(pred_text, gt['gt_choices'], gt_choice):
             tmp_score = 1.0
         score += tmp_score
@@ -359,7 +387,7 @@ def collate_fn(batch):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset-name", default="Mydata")#Lamm,Mydata
-    parser.add_argument("--task-name", default="Classification")#Detection,Counting,Class,PositionRelation,VG,RoomDetection,Navigation
+    parser.add_argument("--task-name", default="PositionRelation")#Detection,Counting,Class,PositionRelation,VG,RoomDetection,Navigation
     parser.add_argument('--answer-file', default=r"/media/kou/Data1/htc/LAMM/answers")
     parser.add_argument('--base-data-path', default=r"/media/kou/Data1/htc/MYDATA/BenchMark/Task/Task_Reconstruct/Test")
     args = parser.parse_args()
@@ -394,7 +422,7 @@ if __name__ == "__main__":
         with open(jonal, 'rb') as f:
             for item in jsonlines.Reader(f):
                 pred_data.append(item)
-    elif task_name == 'Classification':
+    elif task_name == 'Classification' or 1:
         file_ext = '.jsonl'
         file_name = task_name  + file_ext
         args.answer_file = os.path.join(args.answer_file, file_name)
