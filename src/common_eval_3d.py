@@ -6,11 +6,13 @@ from utils import *
 from tqdm import tqdm
 from Loading import LAMM_EVAL_3D
 import random
+import sys
+sys.path.insert(0,'/media/kou/Data1/htc/FastChat/fastchat/serve')
 from torch.utils.data import DataLoader, Dataset
 def Navigation(dataset, pred_data, thres=0.5):
     score = 0
     cnt = 0
-    panish = 1    #每个节点的损失约束
+    panish = 1    #每个节点的损失约束,前1000个
     for gt, pred in tqdm(zip(dataset, pred_data), ncols=40):
         gt_objects = gt['positions']
         text = pred['text']
@@ -39,7 +41,7 @@ def grounding3d_eval(dataset, pred_data, thres=0.25):
     for gt, pred in tqdm(zip(dataset, pred_data), ncols=40):
         gt_objects = gt["object"]
         text = pred['text']
-        object_names = re.findall(r': (\w+)!', text)
+        object_names = re.findall(r':(\w+)!', text)
         # if len(gt_objects) > 5:
         #     continue
         assert gt["id"] == pred["id"]
@@ -48,20 +50,23 @@ def grounding3d_eval(dataset, pred_data, thres=0.25):
         gt_name = [i['name'] for i in gt_objects]
         pred_box = [i['BoundingBox'] for i in preding]
         cnt += len(pred_box)  # gt_objects,pred_box
+        # 按顺序多目标分类
         for pred,obj in zip(pred_name,object_names):
             if pred==obj:
                 score += 1
                 break
+        #只做目标是否检测到
         # for gt_info in gt_objects:
         #     if gt_info['name'] in pred_name and gt_info['name'] in object_names:
         #         class_box = [b for i,b in zip(pred_name,pred_box) if i == gt_info['name']]
+        #         cnt += len(class_box)-1
         #         for index, point in enumerate(class_box):
         #             iou = cal_aro_3d(gt_info['BoundingBox'], point)
         #             if iou > thres:
         #                 score += 1
         #                 break
         scene_num += 1
-        print(scene_num,score / cnt)
+    print(scene_num,score / cnt)
 
 # def grounding3d_eval(dataset, pred_data, thres=0.25):
 #     score = 0
@@ -193,11 +198,66 @@ def Vgrounding3d_eval(dataset, pred_data, thres=0.5):
     print(score / cnt)
 
 def grounding3d(dataset, pred_data):
-    Vgrounding3d_eval(dataset, pred_data, thres=0.25)
-    # Vgrounding3d_eval(dataset, pred_data, thres=0.5)
+    # Vgrounding3d_eval(dataset, pred_data, thres=0.25)
+    Vgrounding3d_eval(dataset, pred_data, thres=0.5)
 
 CHOICE = ['A', 'B', 'C', 'D', 'E', 'F']         # 6 choices in total
 
+def VG_plus_acc(dataset,pred_data):
+    import re
+    pattern_1 = re.compile(r'The answer is \(?[A-F]\)?\W|the answer is \(?[A-F]\)?\W')
+    pattern_2 = re.compile(r'option [A-F]')
+    pattern_3 = re.compile(r'\([A-F]\)')
+    def check_text(text, choices, gt_id):
+        text = text.lower()
+        if choices[gt_id].lower() not in text:
+            return False
+        for id, choice in enumerate(choices):
+            if id == gt_id:
+                continue
+            if choice.lower() in text:
+                return False
+        return True
+    def check_option(res_list, gt_char):
+        for res in res_list:
+            if gt_char not in res:
+                return False
+        return True
+    def check_pattern2(res_list, gt_char):
+        pred = res_list[0][-1]
+        if pred == gt_char:
+            return True
+        return False
+    score = 0.0
+    testnum = 0
+    for gt, pred in tqdm(zip(dataset, pred_data)):
+        tmp_score = 0
+        gt_choice = gt['gt_choice']
+        gt_char = CHOICE[gt_choice]
+        pred_text = pred['text']
+        pred_text = pred_text
+        res_1 = pattern_1.findall(pred_text)
+        res_2 = pattern_2.findall(pred_text)
+        res_3 = pattern_3.findall(pred_text)
+        # if len(res_1) != 0:
+        #     if check_option(res_1, gt_char):
+        #         tmp_score = 1.0
+        # elif len(res_2) != 0:
+        #     if check_pattern2(res_2, gt_char):
+        #         tmp_score = 1.0
+        # elif len(res_3) != 0:
+        #     if check_option(res_3, gt_char):
+        #         tmp_score = 1.0
+        # elif check_text(pred_text, gt['gt_choices'], gt_choice):
+        #     tmp_score = 1.0
+        if check_text(pred_text, gt['gt_choices'], gt_choice):
+            tmp_score = 1.0
+            # print(testnum ,":", gt["sentences"])
+            # print(pred['text'])
+            # print("####################################################")
+        score += tmp_score
+        testnum += 1
+    print('vision: {}'.format(score / testnum))
 
 def VQAvisionacc(dataset,pred_data):
     import re
@@ -283,6 +343,10 @@ def Positoinacc(dataset,pred_data):
         return False
     score = 0.0
     testnum = 0
+    from cli import vicuna
+    from inference import chat
+    model, tokenizer, chatio = vicuna()
+    answer = ''
     for gt, pred in tqdm(zip(dataset, pred_data)):
         tmp_score = 0
         gt_choice = gt['gt_choice']
@@ -304,6 +368,14 @@ def Positoinacc(dataset,pred_data):
                 tmp_score = 1.0
         elif check_text(pred_text, gt['gt_choices'], gt_choice):
             tmp_score = 1.0
+        else:
+            prompt = "Accurately understand positional information firstly, then determine whether the following two sentences express the same or different positional relationship. Be as concise as possible, the same or different\n"
+            input_text = prompt+"Sentence1: "+ gt["sentences"][5:]+"\nSentence2: "+pred_text
+            answer = chat(input_text,model, tokenizer,chatio)
+            if "true" in answer.lower() or "same" in answer.lower():
+                tmp_score = 1.0
+                if "not" in answer.lower():
+                    tmp_score = 0
 
         score += tmp_score
         testnum += 1
@@ -343,8 +415,9 @@ def Counting(dataset,pred_data):
         tmp_score = 0
         gt_choice = gt['gt_choice']
         gt_char = CHOICE[gt_choice]
+        answer = gt["gt_choices"][gt["gt_choice"]]
         pred_text = pred['text']
-        pred_text = pred_text
+        pred_num = re.findall(r'\d+(?:\.\d+)?', pred_text)
         res_1 = pattern_1.findall(pred_text)
         res_2 = pattern_2.findall(pred_text)
         res_3 = pattern_3.findall(pred_text)
@@ -357,8 +430,11 @@ def Counting(dataset,pred_data):
         elif len(res_3) != 0:
             if check_option(res_3, gt_char):
                 tmp_score = 1.0
-        # elif check_text(pred_text, gt['gt_choices'], gt_choice):
-        #     tmp_score = 1.0
+        elif len(res_3) != 0:
+            if check_option(res_3, gt_char):
+                tmp_score = 1.0
+        elif len(pred_num)==1 and str(answer)==pred_num[0]:
+            tmp_score = 1.0
         elif check_text(pred_text, gt['gt_choices'], gt_choice):
             tmp_score = 1.0
         score += tmp_score
@@ -372,9 +448,10 @@ dataset2evalfunc = {
     'Counting': Counting,
     'Classification': VQAvisionacc,
     'PositionRelation':Positoinacc,
-    'VG':grounding3d,
+    'VisualGrounding':grounding3d,
     'Navigation':Navigation,
-    'RoomDetection':Rgrounding3d_eval
+    'RoomDetection':Rgrounding3d_eval,
+    "VisualGrounding_plus":VG_plus_acc
 }
 
 def collate_fn(batch):
@@ -387,7 +464,9 @@ def collate_fn(batch):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset-name", default="Mydata")#Lamm,Mydata
-    parser.add_argument("--task-name", default="PositionRelation")#Detection,Counting,Class,PositionRelation,VG,RoomDetection,Navigation
+    parser.add_argument("--task-name", default="VisualGrounding_plus")#Detection,Counting,Classification,PositionRelation
+                                                                # VisualGrounding,RoomDetection,Navigation
+                                                                #VisualGrounding_plus
     parser.add_argument('--answer-file', default=r"/media/kou/Data1/htc/LAMM/answers")
     parser.add_argument('--base-data-path', default=r"/media/kou/Data1/htc/MYDATA/BenchMark/Task/Task_Reconstruct/Test")
     args = parser.parse_args()

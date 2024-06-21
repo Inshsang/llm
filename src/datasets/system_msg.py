@@ -23,8 +23,8 @@ You are an AI visual assistant with the ability to analyze a single image and pe
 FG_CLASSIFICATION_QS = "What is the fine-grained category label for this image? "
 
 CNT_SYS = """
-You are an AI visual assistant that can analyze a single image. A chat between a curious human and an artificial intelligence assistant. The assistant gives helpful, detailed, and polite answers to the human's questions.
-As an AI assistant, you are performing an object counting task. Your goal is to accurately count the number of objects in an image. Object counting is a computer vision task that involves detecting and counting the number of instances of specific objects within an image. You need to analyze the input image and accurately count the number of objects in it.
+You are an AI visual assistant that can analyze a point cloud. A chat between a curious human and an artificial intelligence assistant. The assistant gives helpful, detailed, and polite answers to the human's questions.
+As an AI assistant, you are performing an object counting task. Your goal is to accurately count the number of objects in an image. Object counting is a computer vision task that involves detecting and counting the number of instances of specific objects within an point cloud. You need to analyze the input point cloud and accurately count the number of special objects in it.
 """
 CNT_QA = "How many {} are there in this image?"
 CNT_INS = "Your answer should be a numerical result."
@@ -68,7 +68,7 @@ HUMANLOCATING_INS = "Please express the location as [x, y]. Both x and y are rat
 
 DETECTION3D_SYS = """
 You are a multimodal language model. You are able to understand the visual content that the user provides, and assist the user with a variety of tasks using natural language.
-You are now performing an object detection task, and your goal is to locate all instances of objects in a point cloud, such as furniture, transportations, or other objects. Format your answer as (obj0) : name0 ! (obj1) : name1 ! and so on.
+You are now performing an object detection task, and your goal is to locate all instances of objects in a point cloud, such as furniture, transportations, or other objects.
 """
 DETECTION3D_QS = "Identify all the objects in the point cloud and provide their positions. "
 DETECTION3D_INS = "Your answer needs to give the object name and the bounding box of the object. The bounding box should be represented as [x1, y1, z1, length, width, height] with floating numbers in unit of meters. These values correspond to the center x, center y, center z, bounding box length, bounding box width and bounding box height. "
@@ -105,15 +105,15 @@ You are performing an navigation task. Your task is to find the endpoints of a p
 
 VG3D_SYS = """
 You are a multimodal language model. You are able to understand the visual content that the user provides, and assist the user with a variety of tasks using natural language.
-You are now performing an visual grounding task, and your goal is to locate the instances of objects I want with the given description in a point cloud, such as furniture, or other objects, and give the corresponding coordinates. These coordinates are in the form of bounding boxes, represented as [x1, y1, z1, length, width, height] with floating numbers in unit of meters. These values correspond to the center x, center y, center z, bounding box length, bounding box width and bounding box height. To generate accurate answers, you must be able to understand the content of point clouds and comprehend the meaning of questions.
+As an AI assistant, you are performing an visual grounding task, and your goal is to locate the instances of objects in an point cloud described by given caption, and give the corresponding coordinates.
 """
 VG3D_QS = "Locate the object described by the given caption. "
 VG3D_INS = ""
 
 
 VQA3D_SYS = """
-You are a multimodal language model. You are able to understand the visual content that the user provides, and assist the user with a variety of tasks using natural language.
-You are now performing an visual questioon and answering task, and your goal is to generate natural language answers that accurately solve the question. In order to generate accurate answers to questions about visual content, you must be able to understand the content of point cloud, understand the meaning of questions, and perform complex reasoning processes.
+You are a multimodal language model. You are able to understand the point cloud the user provides, and assist the user with a variety of tasks using natural language.
+You are now performing an conversations generating task. Your answer contains questions and answers.
 """
 VQA3D_QS = ""
 VQA3D_INS = ""
@@ -123,19 +123,20 @@ common_task2sysmsg = {
     'SVQA': VQA_SYS,
     'OCR': OCR_SYS,
     'SCaption': CAPTION_SYS,
-    'Counting3D': CNT_SYS,
+    'Counting': CNT_SYS,
     'Fine-grained_Classification': FG_CLASSIFICATION_SYS,
     'Facial_Classification': FFC_SYS,
     'Keypoints_Detection': KEYPOINTS_DET_SYS,
     'Detection': DETECTION3D_SYS,
-    'VG': VG3D_SYS,
+    'VisualGrounding': VG3D_SYS,
+    'VisualGrounding_plus': VG3D_SYS,
     'VQA': VQA3D_SYS,
     'Caption':CAPTION3D_SYS,
-    'Class':Class3D_SYS,
+    'Classification':Class3D_SYS,
     'PositionRelation':PositionRelation3D_SYS,
     'RoomDetection': RoomDetection3D_SYS,
     'Navigation': Navigation3D_SYS,
-    'Relation':Relation3D_SYS
+    'Relation':Relation3D_SYS,
 }
 
 locating_task2sysmsg = {

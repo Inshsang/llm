@@ -772,8 +772,13 @@ class LAMMPEFTModel(nn.Module):
         vision_paths = inputs["vision_paths"]
         points_path = inputs["points_path"]
         label_path = inputs["label_path"]
-        max_obj = self.max_obj_len
 
+        if task_type[0] in ['VisualGrounding3d','Detection3d',"PositionRelation","Counting","Navigation"]:
+            self.max_tgt_len = 200
+            max_obj = 30
+        else:
+            self.max_tgt_len = 400
+            max_obj = 12
         vis_embed_list,class_box_gt = [],[]
         points_path = points_path[0]
         #处理vis_embed_list,scene
@@ -788,6 +793,23 @@ class LAMMPEFTModel(nn.Module):
             class_embed, _ = self.encode_obj_pcl(self.device, [obj_numpy])
             class_embed = self.llama_proj(class_embed)
             vis_embed_list = class_embed
+        elif task_type[0]=="Detection3d":
+            vis_numpy_list = []
+            choosen = points_path['Multi_class']
+            points_path['points'] = [path for path,box in zip(points_path['points'],points_path['boxes']) if box in choosen]
+            points_path['classes'] = [path for path, box in zip(points_path['classes'], points_path['boxes']) if
+                                     box in choosen]
+            points_path['boxes'] = [box for box in points_path['boxes'] if
+                                     box in choosen]
+            for i in points_path['points']:
+                obj_numpy = np.load(i)
+                vis_numpy_list.append(obj_numpy)
+                x, y, z = np.mean(obj_numpy, axis=0)
+                w, l, h = np.max(np.abs(obj_numpy), axis=0)
+                class_box_gt.append([round(x, 1), round(y, 1), round(z, 1)])
+            vis_embeds, _ = self.encode_obj_pcl(self.device, vis_numpy_list[:max_obj])
+            vis_embeds = self.llama_proj(vis_embeds)
+            vis_embed_list = vis_embeds
         else:
             vis_numpy_list = []
             for i in points_path['points']:
@@ -801,35 +823,6 @@ class LAMMPEFTModel(nn.Module):
             vis_embeds = self.llama_proj(vis_embeds)
             vis_embed_list = vis_embeds
 
-
-
-        # #处理vis_embed_list
-        # if task_type[0] in options:
-        #     vis_embed_list = options[task_type[0]](detection_gt, max_obj, self.device,vision_paths,torch.stack(obj_points))
-        # else:
-        #     vis_embed_list = []
-        #     print("Wrong task_type,choose one from [Detection,Counting,Class,PositionRelation,VG,RoomDetection,Navigation]")
-
-        # #处理无bbox的情况
-        # class_gt = inputs["class_gt"]
-        # class_box_gt = inputs["class_box_gt"]
-        # if task_type[0] == "Classification3d":
-        #     vis_embed_list = vis_embed_list
-        #     class_gt = ['Unknown']*len(task_type)
-        #     class_box_gt = [
-        #         [round(value, 2) for value in torch.mean(box, dim=0).tolist()] +  # xyz均值
-        #         [round(value, 2) for value in torch.max(torch.abs(box), dim=0).values.tolist()]  # wlh最大绝对值
-        #         for box in inputs['obj_points']
-        #     ]
-        #     # class_box_gt = [[0,0,0,2,2,2]]*len(task_type)
-        # batch_input_ids = []
-        # index = 0
-        # for c,b in zip(class_gt[:max_obj],class_box_gt[:max_obj]):
-        #     class_name = c +str(b)+'!'
-        #     class_name = self.llama_tokenizer(class_name, add_special_tokens=False).input_ids
-        #     batch_input_ids.append(torch.LongTensor(class_name))
-        #     index+=1
-        #处理无bbox的情况
 
         batch_input_ids = []
         for index,b in enumerate(class_box_gt[:max_obj]):
@@ -926,20 +919,21 @@ class LAMMPEFTModel(nn.Module):
 
 
         if inputs["task_type"] in ["Classification",'DescriptionObj3d','ConversationObj3d']:
+            max_obj = 12
             x,y,z = np.mean(inputs['list_of_objpoints'], axis=0)
             class_box_gt = [[round(x, 1), round(y, 1), round(z, 1)]]
             w,l,h = np.max(np.abs(inputs['list_of_objpoints']), axis=0)
         # class_box_gt = [[round(x, 2),round(y, 2),round(z, 2),round(w, 2),round(l, 2),round(h, 2)]]
         else:
+            max_obj = 30
             class_list = [classname["name"] for classname in inputs["obj_list"]]
             class_box_gt = [[round(classname['BoundingBox'][0], 1),round(classname['BoundingBox'][1], 1),round(classname['BoundingBox'][2], 1)] for classname in inputs["obj_list"]]
 
-        max_obj = self.max_obj_len
         batch_input_ids,class_name_target_ids = [],[]
 
         for index,b in enumerate(class_box_gt[:max_obj]):
-        #     class_name = 'obj'+str(index)+str(b)+'!'
-            class_name = str(b)+'!'
+            class_name = 'obj'+str(index)+str(b)+'!'
+            # class_name = str(b)+'!'
             class_name = self.llama_tokenizer(class_name, add_special_tokens=False).input_ids
             class_name_target_ids += [-100] * len(class_name)
             batch_input_ids.append(torch.LongTensor(class_name))
