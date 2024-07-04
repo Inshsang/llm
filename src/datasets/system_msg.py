@@ -105,7 +105,7 @@ You are performing an navigation task. Your task is to find the endpoints of a p
 
 VG3D_SYS = """
 You are a multimodal language model. You are able to understand the visual content that the user provides, and assist the user with a variety of tasks using natural language.
-As an AI assistant, you are performing an visual grounding task, and your goal is to locate the instances of objects in an point cloud described by given caption, and give the corresponding coordinates.
+As an AI assistant, you are performing an visual grounding task, and your goal is to locate the instances of objects in an point cloud described by given caption, and tell which (obj) it is.
 """
 VG3D_QS = "Locate the object described by the given caption. "
 VG3D_INS = ""
@@ -115,6 +115,12 @@ VQA3D_SYS = """
 You are a multimodal language model. You are able to understand the point cloud the user provides, and assist the user with a variety of tasks using natural language.
 You are now performing an conversations generating task. Your answer contains questions and answers.
 """
+
+VQAobj3D_SYS = """
+You are an AI visual assistant that can analyze a point cloud. A chat between a curious human and an artificial intelligence assistant. The assistant gives helpful, detailed, and polite answers to the human's questions. 
+As an AI assistant, you are performing a conversation task.
+"""
+
 VQA3D_QS = ""
 VQA3D_INS = ""
 
@@ -137,6 +143,8 @@ common_task2sysmsg = {
     'RoomDetection': RoomDetection3D_SYS,
     'Navigation': Navigation3D_SYS,
     'Relation':Relation3D_SYS,
+    'ConversationObj':VQAobj3D_SYS,
+    'DescriptionObj':CAPTION3D_SYS
 }
 
 locating_task2sysmsg = {

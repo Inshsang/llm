@@ -9,12 +9,133 @@ import random
 import sys
 sys.path.insert(0,'/media/kou/Data1/htc/FastChat/fastchat/serve')
 from torch.utils.data import DataLoader, Dataset
+import openai
+openai.base_url = 'https://api.gpts.vin/v1'
+openai.api_key = 'sk-zhSLBdQLuAKkqLDZDe22058727E34581B48cB1774975D688'
+
+from openai import OpenAI
+
+client = OpenAI(
+    base_url="https://api.gpts.vin/v1",
+    api_key="sk-zhSLBdQLuAKkqLDZDe22058727E34581B48cB1774975D688"
+)
+
+Class_ALL = [
+    "alarmclock",
+    "apple",
+    "armchair",
+    "baseballbat",
+    "basketball",
+    "bed",
+    "book",
+    "boots",
+    "bottle",
+    "bowl",
+    "box",
+    "bread",
+    "butterknife",
+    "candle",
+    "cart",
+    "cellphone",
+    "chair",
+    "cloth",
+    "clothesdryer",
+    "coffeemachine",
+    "coffeetable",
+    "countertop",
+    "creditcard",
+    "cup",
+    "desk",
+    "desklamp",
+    "desktop",
+    "diningtable",
+    "dishsponge",
+    "dogbed",
+    "doorway",
+    "dresser",
+    "dumbbell",
+    "egg",
+    "faucet",
+    "floorlamp",
+    "fork",
+    "fridge",
+    "garbagebag",
+    "garbagecan",
+    "houseplant",
+    "kettle",
+    "keychain",
+    "knife",
+    "ladle",
+    "laptop",
+    "laundryhamper",
+    "lettuce",
+    "microwave",
+    "mug",
+    "newspaper",
+    "ottoman",
+    "painting",
+    "pan",
+    "papertowelroll",
+    "pen",
+    "pencil",
+    "peppershaker",
+    "pillow",
+    "plate",
+    "plunger",
+    "pot",
+    "potato",
+    "remotecontrol",
+    "safe",
+    "saltshaker",
+    "shelvingunit",
+    "sidetable",
+    "sink",
+    "soapbar",
+    "soapbottle",
+    "sofa",
+    "spatula",
+    "spoon",
+    "spraybottle",
+    "statue",
+    "stool",
+    "tabletopdecor",
+    "teddybear",
+    "television",
+    "tennisracket",
+    "tissuebox",
+    "toaster",
+    "toilet",
+    "toiletpaper",
+    "tomato",
+    "tvstand",
+    "vacuumcleaner",
+    "vase",
+    "washingmachine",
+    "watch",
+    "window",
+    "winebottle"
+]
+
+# def get_completion(prompt, model="gpt-3.5-turbo"):
+#     prompt = 'hello'
+#     messages = [{"role": "user", "content": prompt}]
+#     response = openai.ChatCompletion.create(
+#         model=model,
+#         messages=messages,
+#         temperature=1,#this is the degree of randomness of the model'soutput
+#     )
+#     return response.choices[0].message["content"]
+#
+# print(completion('hello'))
+
 def Navigation(dataset, pred_data, thres=0.5):
     score = 0
     cnt = 0
     panish = 1    #每个节点的损失约束,前1000个
     for gt, pred in tqdm(zip(dataset, pred_data), ncols=40):
         gt_objects = gt['positions']
+        # if len(gt_objects)>=20:
+        #     continue
         text = pred['text']
         points = parse_bbox_3d_Nav(text)
         cnt += 1
@@ -37,24 +158,43 @@ def grounding3d_eval(dataset, pred_data, thres=0.25):
     score = 0
     cnt = 0
     scene_num = 0
-    Pred = json.load(open("/media/kou/Data1/htc/LAMM/data/metadata/Detection.json"))
+    Detection = jsonlines.Reader(open("/media/kou/Data1/htc/MYDATA/BenchMark/Task/GT/Detection.json"))
+    new_classdict = {}
+    for i in Detection:
+        flag =0
+        key = list(i.keys())[0]
+        if int(key) < 460 or int(key) > 500:
+            continue
+
+        new_classlist = [new_class for new_class in i[key] if new_class["name"].lower() in ["cabinet","bed","chair","sofa","diningtable","doorway","window","shelf", "painting","countertop","desk","fridge","toilet","sink","garbagecan"]]
+        new_classdict[key] = new_classlist
     for gt, pred in tqdm(zip(dataset, pred_data), ncols=40):
-        gt_objects = gt["object"]
         text = pred['text']
-        object_names = re.findall(r':(\w+)!', text)
-        # if len(gt_objects) > 5:
-        #     continue
-        assert gt["id"] == pred["id"]
-        preding = Pred[gt["id"]]
-        pred_name = [i['name'] for i in preding]
-        gt_name = [i['name'] for i in gt_objects]
-        pred_box = [i['BoundingBox'] for i in preding]
-        cnt += len(pred_box)  # gt_objects,pred_box
-        # 按顺序多目标分类
-        for pred,obj in zip(pred_name,object_names):
-            if pred==obj:
-                score += 1
-                break
+        meta_pre = gt['object']
+        cnt += len(text)
+        box_gt = new_classdict[gt['id']]
+
+        for pred,obj in zip(text,meta_pre):
+            cnt+=1
+            if obj['name'] in pred:
+                for real_box in box_gt:
+                    if obj['name'] in real_box['name'].lower():
+                        iou = cal_aro_3d(obj['BoundingBox'], real_box["BoundingBox"])
+                        if iou>0.5:
+                            score += 1
+
+        # object_names = re.findall(r':(\w+)!', text)
+        # assert gt["id"] == pred["id"]
+        # preding = Pred[gt["id"]]
+        # pred_name = [i['name'] for i in preding]
+        # gt_name = [i['name'] for i in gt_objects]
+        # pred_box = [i['BoundingBox'] for i in preding]
+        # cnt += len(pred_box)  # gt_objects,pred_box
+        # # 按顺序多目标分类
+        # for pred,obj in zip(pred_name,object_names):
+        #     if pred==obj:
+        #         score += 1
+        #         break
         #只做目标是否检测到
         # for gt_info in gt_objects:
         #     if gt_info['name'] in pred_name and gt_info['name'] in object_names:
@@ -168,7 +308,6 @@ def Rgrounding3d_eval(dataset, pred_data, thres=0.5):
                 continue
             for index, point in enumerate(bboxes):
                 iou = cal_iou_3d(object_info['bbox'], point)
-
                 if iou > 0.5:
                     score += 1
                     break
@@ -177,24 +316,47 @@ def Rgrounding3d_eval(dataset, pred_data, thres=0.5):
 def Vgrounding3d_eval(dataset, pred_data, thres=0.5):
     score = 0
     cnt = 0
+
+    Detection = jsonlines.Reader(open("/media/kou/Data1/htc/MYDATA/BenchMark/Task/GT/Detection.json"))
+    new_classdict = {}
+    for i in Detection:
+        flag =0
+        key = list(i.keys())[0]
+        if int(key) < 460 or int(key) >= 500:
+            continue
+        new_classlist = [new_class for new_class in i[key] if new_class["name"].lower() in Class_ALL]
+        new_classdict[key] = new_classlist
+
     for gt, pred in tqdm(zip(dataset, pred_data), ncols=40):
         gt_objects = gt['object']
         text = pred['text']
-        bboxes = parse_bbox_3d_Vis(text)
-        cnt += 1#gt_objects,bbox
-        # for object_info in gt_objects:
-        # if not classification_acc(gt_objects['label'], text):
-        #     continue
-        # for bbox in bboxes:
-        if len(bboxes) != 1:
+        cnt += 1  # gt_objects,bbox
+        match = re.search(r'obj(\d+)', text)
+        gtBox = new_classdict[gt['id']]
+        # 直接读obj
+        if match:
+            pre_num = int(match.group(1))
+            gtBox = gtBox[pre_num]['BoundingBox']
+            bboxes = gtBox
+
+        #直接读xyz
+        bboxes = parse_bbox_2d_Vis(text)
+        if len(bboxes):
+            bboxes = bboxes[0]
+        else:
             continue
-        if len(bboxes[0]) != 6:
-            continue
-        iou = cal_aro_3d(gt_objects, bboxes[0])
-        # if iou > 0:
-        #     print(iou)
-        if iou > thres:
+
+        # 提取点2的xyz坐标
+        point2_xyz = gt_objects[:3]
+
+        # 计算两点之间的欧几里得距离
+        distance = math.sqrt(
+            (point2_xyz[0] - bboxes[0]) ** 2 + (point2_xyz[1] - bboxes[1]) ** 2 + (point2_xyz[2] - bboxes[2]) ** 2)
+
+        # 判断距离是否小于或等于1
+        if distance <= 1:
             score += 1
+
     print(score / cnt)
 
 def grounding3d(dataset, pred_data):
@@ -205,56 +367,50 @@ CHOICE = ['A', 'B', 'C', 'D', 'E', 'F']         # 6 choices in total
 
 def VG_plus_acc(dataset,pred_data):
     import re
-    pattern_1 = re.compile(r'The answer is \(?[A-F]\)?\W|the answer is \(?[A-F]\)?\W')
-    pattern_2 = re.compile(r'option [A-F]')
-    pattern_3 = re.compile(r'\([A-F]\)')
-    def check_text(text, choices, gt_id):
-        text = text.lower()
-        if choices[gt_id].lower() not in text:
-            return False
-        for id, choice in enumerate(choices):
-            if id == gt_id:
-                continue
-            if choice.lower() in text:
-                return False
-        return True
-    def check_option(res_list, gt_char):
-        for res in res_list:
-            if gt_char not in res:
-                return False
-        return True
-    def check_pattern2(res_list, gt_char):
-        pred = res_list[0][-1]
-        if pred == gt_char:
-            return True
-        return False
     score = 0.0
     testnum = 0
+    pred_bbox = json.load(open("/media/kou/Data1/htc/LAMM/data/metadata/Detection.json"))
     for gt, pred in tqdm(zip(dataset, pred_data)):
         tmp_score = 0
-        gt_choice = gt['gt_choice']
-        gt_char = CHOICE[gt_choice]
+        #gt_choice = gt['obj_num']   #误区,detection的num不是metadata的num
         pred_text = pred['text']
-        pred_text = pred_text
-        res_1 = pattern_1.findall(pred_text)
-        res_2 = pattern_2.findall(pred_text)
-        res_3 = pattern_3.findall(pred_text)
-        # if len(res_1) != 0:
-        #     if check_option(res_1, gt_char):
-        #         tmp_score = 1.0
-        # elif len(res_2) != 0:
-        #     if check_pattern2(res_2, gt_char):
-        #         tmp_score = 1.0
-        # elif len(res_3) != 0:
-        #     if check_option(res_3, gt_char):
-        #         tmp_score = 1.0
-        # elif check_text(pred_text, gt['gt_choices'], gt_choice):
-        #     tmp_score = 1.0
-        if check_text(pred_text, gt['gt_choices'], gt_choice):
-            tmp_score = 1.0
-            # print(testnum ,":", gt["sentences"])
-            # print(pred['text'])
-            # print("####################################################")
+        pre_box = pred_bbox[gt['id']]
+        match = re.search(r'obj(\d+)', pred_text)
+
+        # if match:
+        #     pre_num = int(match.group(1))
+        #     if pre_num>=len(pre_box):
+        #         continue
+        #     pre_box = pre_box[pre_num]["BoundingBox"]
+        #     iou = cal_iou_3d(gt['bbox'], pre_box)
+        #     if iou>0.5:
+        #         tmp_score = 1
+
+        #直接读xyz
+        bboxes = parse_bbox_2d_Vis(pred_text)
+        if len(bboxes):
+            bboxes = bboxes[0]
+        else:
+            continue
+
+        # 提取点2的xyz坐标
+        point2_xyz = gt['bbox'][:3]
+
+        # 计算两点之间的欧几里得距离
+        distance = math.sqrt(
+            (point2_xyz[0] - bboxes[0]) ** 2 + (point2_xyz[1] - bboxes[1]) ** 2 + (point2_xyz[2] - bboxes[2]) ** 2)
+
+        # 判断距离是否小于或等于1
+        if distance <= 1:
+            score += 1
+        # if match and int(match.group(1)) == gt_choice:
+        #     # 返回匹配到的数字部分
+        #     gtbox = gt["bbox"]
+        #     pre_box = pre_box[int(match.group(1))]["BoundingBox"]
+        #     iou = cal_iou_3d(gtbox, pre_box)
+        #     if iou>0.5:
+        #         tmp_score = 1
+
         score += tmp_score
         testnum += 1
     print('vision: {}'.format(score / testnum))
@@ -343,11 +499,12 @@ def Positoinacc(dataset,pred_data):
         return False
     score = 0.0
     testnum = 0
-    from cli import vicuna
-    from inference import chat
-    model, tokenizer, chatio = vicuna()
-    answer = ''
-    for gt, pred in tqdm(zip(dataset, pred_data)):
+
+    # from cli import vicuna
+    # from inference import chat
+    # model, tokenizer, chatio = vicuna()
+    answer_save = {}
+    for gt, pred,index in tqdm(zip(dataset, pred_data,range(len(dataset)))):
         tmp_score = 0
         gt_choice = gt['gt_choice']
         gt_char = CHOICE[gt_choice]
@@ -357,25 +514,27 @@ def Positoinacc(dataset,pred_data):
         res_2 = pattern_2.findall(pred_text)
         res_3 = pattern_3.findall(pred_text)
 
-        if len(res_1) != 0:
-            if check_pattern2(res_1, gt_char):
-                tmp_score = 1.0
-        elif len(res_2) != 0:
-            if check_pattern2(res_2, gt_char):
-                tmp_score = 1.0
-        elif len(res_3) != 0:
-            if check_option(res_3, gt_char):
-                tmp_score = 1.0
-        elif check_text(pred_text, gt['gt_choices'], gt_choice):
+        prompt = "Accurately understand positional information firstly, then determine whether the following two sentences express the same or different positional relationship. Be as concise as possible, the same or different\n"
+        # input_text = prompt + "Sentence1: " + gt["sentences"][5:] + "\nSentence2: " + gt["sentences"][5:]
+        input_text = prompt+"Sentence1: "+ gt["sentences"][5:]+"\nSentence2: "+pred_text
+        # answer = chat(input_text,model, tokenizer,chatio)
+        completion = client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=[
+                {"role": "system", "content": "You are a helpful assistant."},
+                {"role": "user", "content": input_text}
+            ]
+        )
+        answer = completion.choices[0].message.content
+        # print(completion.choices[0].message.content)
+        if "true" in answer.lower() or "same" in answer.lower():
             tmp_score = 1.0
-        else:
-            prompt = "Accurately understand positional information firstly, then determine whether the following two sentences express the same or different positional relationship. Be as concise as possible, the same or different\n"
-            input_text = prompt+"Sentence1: "+ gt["sentences"][5:]+"\nSentence2: "+pred_text
-            answer = chat(input_text,model, tokenizer,chatio)
-            if "true" in answer.lower() or "same" in answer.lower():
-                tmp_score = 1.0
-                if "not" in answer.lower():
-                    tmp_score = 0
+            if "not" in answer.lower():
+                tmp_score = 0
+        with open("/media/kou/Data1/htc/LAMM/answers/Gpt_results/positionrelation.jsonl",
+                  'a') as f:
+            f.write(json.dumps({tmp_score:answer}) + "\n")
+            f.flush()
 
         score += tmp_score
         testnum += 1
@@ -462,13 +621,16 @@ def collate_fn(batch):
     return res
 
 if __name__ == "__main__":
+    root_path = '/media/kou/Data1/'
+    # root_path = 'G:\event\htc/'
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset-name", default="Mydata")#Lamm,Mydata
     parser.add_argument("--task-name", default="VisualGrounding_plus")#Detection,Counting,Classification,PositionRelation
                                                                 # VisualGrounding,RoomDetection,Navigation
                                                                 #VisualGrounding_plus
-    parser.add_argument('--answer-file', default=r"/media/kou/Data1/htc/LAMM/answers")
-    parser.add_argument('--base-data-path', default=r"/media/kou/Data1/htc/MYDATA/BenchMark/Task/Task_Reconstruct/Test")
+    parser.add_argument('--answer-file', default=root_path+r"htc/LAMM/answers")
+    parser.add_argument('--base-data-path', default=root_path+r"htc/MYDATA/BenchMark/Task/Task_Reconstruct/Test")
+    # parser.add_argument('--base-data-path', default=root_path+r"htc/MYDATA/BenchMark/Task/Test")
     args = parser.parse_args()
    
     dataset_name = args.dataset_name
@@ -493,14 +655,12 @@ if __name__ == "__main__":
     #     jonal = r'G:\event\htc\LAMM\answers\Counting\Counting.jsonl'
     # if task_name == 'Class':
     #     jonal = r'G:\event\htc\LAMM\answers\Class\Class.jsonl'
-    if task_name == 'Detection':
-        jonal = r'/media/kou/Data1/htc/LAMM/answers/Detection.jsonl'
-        import jsonlines
-        pred_data = []
-
-        with open(jonal, 'rb') as f:
-            for item in jsonlines.Reader(f):
-                pred_data.append(item)
+    if task_name == 'Navigation':#PositionRelation
+        jonal = r'/media/kou/Data1/htc/LAMM_v1/answers/Navigation_Finetune_600/Navigation_Mydata.jsonl'
+        pred_data = jsonlines.Reader(open(jonal))
+    elif task_name == 'VisualGrounding_plus':#PositionRelation
+        jonal = r'/media/kou/Data1/htc/LAMM_v1/answers/VG_Finetune_600/Navigation_Mydata.jsonl'
+        pred_data = jsonlines.Reader(open(jonal))
     elif task_name == 'Classification' or 1:
         file_ext = '.jsonl'
         file_name = task_name  + file_ext

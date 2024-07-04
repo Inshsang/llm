@@ -14,9 +14,9 @@ answers_file = ''
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--task_type", type=str, default='VisualGrounding_plus', help="task type" #Detection,Counting,Classification,PositionRelation,
-                                                                            # VisualGrounding,RoomDetection,Navigation,
-                                                                                #VQA,Relation,Caption
+        "--task_type", type=str, default='VisualGrounding', help="task type" #Detection,Counting,Classification,PositionRelation,
+                                                                            # VisualGrounding,RoomDetection,Navigation,VisualGrounding_plus
+                                                                                #VQA,Relation,Caption,ConversationObj,DescriptionObj
     )
     # parser.add_argument("--dataset-name", default="detection")
     parser.add_argument(
@@ -49,9 +49,9 @@ def parse_args():
     parser.add_argument(
         "--delta_ckpt_path",
         type=str,
-        default="/media/kou/Data1/htc/LAMM/ckpt/--ALLNavi_test/pytorch_model_ep1.pt",
+        # default="/media/kou/Data1/htc/LAMM/ckpt/-Llanguage/pytorch_model.pt",
         # default="/media/kou/Data1/htc/LAMM/ckpt/--ALLV0/pytorch_model_ep2.pt",
-        # default="/media/kou/Data1/htc/LAMM/ckpt/--ALL/pytorch_model_ep1.pt",
+        default="/media/kou/Data1/htc/LAMM/ckpt/--ALL1/pytorch_model_ep1.pt",
         help="path of delta parameters from previous stage; Only matter for stage 2",
     )
     parser.add_argument('--stage', type=int, default=2,)
@@ -175,9 +175,9 @@ def Class_response(args,
         model=model,
         input=input,
         pcl_paths=pcl_paths,
-        max_length=20,
-        top_p=0.95,
-        temperature=0.8,
+        max_length=1800,
+        top_p=0.6,
+        temperature=0.7,
         history=[],
         sys_msg=sys_msg,
         obj_list=obj_lists,
@@ -247,26 +247,28 @@ def Detection_response(args,
     :return list: list of response
     """
     src_id = pcl_paths[0][37:-4]
-    history = predict(
-        args=args,
-        model=model,
-        input=input,
-        pcl_paths=pcl_paths,
-        max_length=args.max_tgt_len,
-        top_p=0.9,
-        temperature=0.8,
-        history=[],
-        sys_msg=sys_msg,
-        obj_list=obj_lists,
-        list_of_objpoints=list_of_objpoints,
-        task_type=args.task_type,
-    )
-    response = history[-1][1]
+    input = ["What's the 3D point cloud about?"]
+    num = len(obj_lists)
     ans_list = []
-
-    for res in response:
-        ans_list.append(res.split('###')[0])
-    return ans_list
+    for i in range(num):
+        obj = obj_lists[i]
+        history = predict(
+            args=args,
+            model=model,
+            input=input,
+            pcl_paths=pcl_paths,
+            max_length=args.max_tgt_len,
+            top_p=0.9,
+            temperature=0.8,
+            history=[],
+            sys_msg=sys_msg,
+            obj_list=[obj],
+            list_of_objpoints=list_of_objpoints,
+            task_type=args.task_type,
+        )
+        response = history[-1][1][0].split('###')[0]
+        ans_list.append(response)
+    return [ans_list]
 
 
 def main(args):
@@ -309,77 +311,61 @@ def main(args):
     list_of_objpoints[0] = [npy for index, npy in enumerate(list_of_objpoints[0]) if index != 773]
     list_of_objpoints[1] = [npy for index,npy in enumerate(list_of_objpoints[1]) if index!=773]
 
-    if task_name in ['Classification','DescriptionObj3d','ConversationObj3d']:
+    if task_name in ['Classification','DescriptionObj','ConversationObj']:
         args.max_obj = 12
         obj_lists = [{'name':'Unknown','BoundingBox':[0,0,0,2,2,2]}]
-    elif task_name == ["Detection"]:
-        args.max_obj = 30
+    elif task_name in ["Detection"]:
+        args.max_obj = 20
         Detection_lists = json.load(open("/media/kou/Data1/htc/MYDATA/BenchMark/Task/Task_Reconstruct/Test/Detection.json"))
     else:
-        args.max_obj = 30
+        args.max_obj = 20
         obj_lists = json.load(open("/media/kou/Data1/htc/LAMM/data/metadata/" + "Detection" + ".json", 'r'))
 
 
     ans_list = []
     ans_file = open(os.path.splitext(answers_file)[0] + '.jsonl', 'w')
     for index,data_item in enumerate(tqdm(dataloader)):
-        # if data_item["pcl"][0] in exist_list:
-        #     continue
+        if index>=1385:
+            continue
         prompt = data_item['query']
         pcl_paths = data_item['pcl']
 
-        if task_name == 'Detection':
+        if task_name == 'Detection':    #多目标分类只输入多个物体(从场景中割除)，训练也是如此
             obj_lists = Detection_lists[index]['object']
             response_func = Detection_response
         elif task_name in ['Classification','DescriptionObj','ConversationObj']:
             response_func = Class_response
+            class_num = list_of_class_name.index(data_item['id'][0])
+            index = class_num
         else:
             response_func = Other_response
 
         if task_name == 'Relation':
-            prompt = ["Analyze the relationships between various objects."]
+            prompt = ["Generate relational inference generated based on the reality of the objects in the scene. For example, A dining table and a bowl are used for dining. Remember relation explanation must be between two things."]
         elif task_name == 'Caption':
             prompt = ["Write a detailed caption by classifying and describing different rooms in 150-200 words, illustrating their types, appearance and other information such as functionalities, usages, daily-life knowledge."]
+        elif task_name == 'VQA':
+            prompt = ["You need to create three question-and-answer pairs centered around the objects, ensuring that the context is interconnected. Format your response as a list,[Q1,A1,Q2,A2,Q3,A3]. Response must be logically related."]
+        elif task_name == 'VisualGrounding_plus':
+            prompt = ["In all objects, tell me w"+prompt[0][1:]]
+        elif task_name == 'DescriptionObj':
+            prompt = [
+                "Describe this object in 1000-2000 words, as if the object is right in front of you. Illustrating its type, appearance and other information such as functionalities, usages, daily-life knowledge."]
+        elif task_name == 'ConversationObj':
+            prompt = [
+                "You must create three question-and-answer pairs centered around this furniture, ensuring that the context is focus on this indoor object point cloud. Format your response as a list,[Q1,A1,Q2,A2,Q3,A3]."]
 
-        if task_name == 'VQA':
-            # prompt = ["Generate 5 Q&As about the objects in scene. All conversations must be logically related."
-            #           "Format your responses as Q1,A1; Q2,A2; Q3,A3; Q4,A4; Q5,A5. "
-            #           ]
-            prompt = ["You need to create three question-and-answer pairs centered around the objects, ensuring that the context is interconnected. Format your response as a list,[Q1,A1,Q2,A2,Q3,A3]. Response must be logically related."
-                      ]
-            answer_list = response_func(
-                args=args,
-                model=model,
-                input=prompt,
-                pcl_paths=pcl_paths,
-                sys_msg=sys_msg,
-                obj_lists=obj_lists,
-                list_of_objpoints=list_of_objpoints[0][index]
-            )
-            # for i in range(4):
-            #     answer_list = response_func(
-            #         args=args,
-            #         model=model,
-            #         input=prompt,
-            #         pcl_paths=pcl_paths,
-            #         sys_msg=sys_msg,
-            #         obj_lists=obj_lists,
-            #         list_of_objpoints=list_of_objpoints[0][index]
-            #     )
-            #     prompt = [prompt[0]+answer_list[0]]
-        else:
-            answer_list = response_func(
-                args=args,
-                model=model,
-                input=prompt,
-                pcl_paths=pcl_paths,
-                sys_msg=sys_msg,
-                obj_lists=obj_lists,
-                list_of_objpoints = list_of_objpoints[0][index]
-            )
+        answer_list = response_func(
+            args=args,
+            model=model,
+            input=prompt,
+            pcl_paths=pcl_paths,
+            sys_msg=sys_msg,
+            obj_lists=obj_lists,
+            list_of_objpoints = list_of_objpoints[0][index]
+        )
 
         for id, output in zip(data_item['id'], answer_list):
-            #print(output,prompt[0])
             ans_dict = {"id": id,
                         "pcl": data_item['pcl'],
                         "text": output,

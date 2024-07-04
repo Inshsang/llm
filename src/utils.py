@@ -1,21 +1,21 @@
 import string
-from nltk import word_tokenize
-from nltk.corpus import stopwords
-from nltk.corpus import wordnet
-from nltk.corpus import wordnet as wn
-stops = set(stopwords.words("english"))
+# from nltk import word_tokenize
+# from nltk.corpus import stopwords
+# from nltk.corpus import wordnet
+# from nltk.corpus import wordnet as wn
+# stops = set(stopwords.words("english"))
 import numpy as np
 import re
 num_pattern =  re.compile(r'[0-9]+\.?[0-9]*')
 import math
 
-def parse_entity(text):
-    text = text.lower()
-    words = word_tokenize(text)
-    words = [word for word in words if word not in string.punctuation]
-    words = [word for word in words if word not in stops]
-    words = [wordnet.morphy(word) for word in words if word not in stops]
-    return words
+# def parse_entity(text):
+#     text = text.lower()
+#     words = word_tokenize(text)
+#     words = [word for word in words if word not in string.punctuation]
+#     words = [word for word in words if word not in stops]
+#     words = [wordnet.morphy(word) for word in words if word not in stops]
+#     return words
 
 
 def is_number(s):
@@ -193,6 +193,23 @@ def parse_bbox_3d_Vis(text):
         bbox_list.append(cur_bbox)
     return bbox_list
 
+
+def parse_bbox_2d_Vis(text):
+    num_list = []
+    num_list = parse_num(num_list, '[', ']', text)
+    num_list = parse_num(num_list, '(', ')', text)
+
+    bbox_list = []
+    num_list = num_list[:(len(num_list) // 3) * 3]
+    if len(num_list) == 0:
+        str_list = num_pattern.findall(text)
+        num_list = [float(item) for item in str_list]
+        num_list = num_list[:(len(num_list) // 3) * 3]
+    for i in range(0, len(num_list), 3):
+        cur_bbox = [num_list[j] for j in range(i, i + 3)]
+
+        bbox_list.append(cur_bbox)
+    return bbox_list
 
 def parse_bbox_3d_Nav(text):
     num_list = []

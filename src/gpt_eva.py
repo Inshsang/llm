@@ -18,7 +18,24 @@ import re
 # i = 0
 # import openai
 # openai.api_key = key[i]
+import openai
 
+
+from openai import OpenAI
+
+client = OpenAI(
+    base_url='https://use.52apikey.cn/v1',
+    api_key='sk-t0hsFiTCePfhTgC1399524CdCcE345D08498Ed9dEd453fE9'
+)
+# completion = client.chat.completions.create(
+#   model="gpt-3.5-turbo",
+#   messages=[
+#     {"role": "system", "content": "You are a helpful assistant."},
+#     {"role": "user", "content": "Hello!"}
+#   ]
+# )
+#
+# print(completion)
 
 def datatrans(scene):
     rooms = scene['rooms']
@@ -44,14 +61,6 @@ def datatrans(scene):
 
 
 
-def get_completion(messages, model="gpt-3.5-turbo"):
-
-    response = openai.ChatCompletion.create(
-        model=model,
-        messages=messages
-    )
-    return response.choices[0].message["content"]
-
 prompts='''
 'Analyze the 3D object model from the given caption: ' 
 '1. Write a detailed caption by classifying and describing different rooms in 150-200 words, illustrating their types, appearance and other information such as functionalities, usages, daily-life knowledge.' 
@@ -72,19 +81,29 @@ parser.add_argument("-i", type=int, default=0, help="an optional integer argumen
 args = parser.parse_args()
 
 if __name__ == "__main__":
-    Task_type = "Caption"#VQA,Caption,Relation
+    Task_type = "ConversationObj"#VQA,Caption,Relation,DescriptionObj,ConversationObj
     rootpath = "/media/kou/Data1/htc/LAMM/answers/"
-    Level = "Scene"#Scene,Object
+    Level = "Object"#Scene,Object
     if Task_type == "VQA":
         path = rootpath+r'VQA.jsonl'
     elif Task_type == "Caption":
         path = rootpath+r'Caption.jsonl'
-    else:
+    elif Task_type == "Relation":
         path = rootpath+r'Relation.jsonl'
+    elif Task_type == "DescriptionObj":
+        path = rootpath+r'DescriptionObj.jsonl'
+        # path = '/media/kou/Data1/htc/LAMM_v1/answers/Caption/89Caption_Mydata.json'
+        # path ='/media/kou/Data1/htc/LAMM_v1/answers/Caption/70Caption_Mydata.json'
+    elif Task_type == "ConversationObj":
+        path = rootpath+r'ConversationObj.jsonl'
+        # path = '/media/kou/Data1/htc/LAMM_v1/answers/VQA/VQA_Mydata.json'
+        # path = '/media/kou/Data1/htc/LAMM_v1/answers/VQA/82VQA_Mydata.json'
     sys_prompt = {
-        "VQA":"Your answer must be only a overall score.Use 0 to 10 to give the score. You are the quality evaluator of the generated text content, which is a three round Q&As generated based on the reality of the scenario.You'll be informed about the rooms and objects included in the 3D scene, and your taske is to evaluate the quality of the five rounds QA, including whether they are five rounds of QA, and the quality of the text.",
-        "Relation":"Your answer must only be an overall score. Use 0 to 10 to give the score. You are the quality evaluator of the generated text content, which is a relational inference generated based on the reality of the objects in the scene. You will be informed about the rooms and objects included in scene, and your task is to evaluate the accuracy of relational reasoning.",
-        "Caption": "Your answer must be only a overall score.Use 0 to 10 to give the score. You are the quality evaluator of the generated text content, which is a long caption generated based on the reality of the scene. You will be informed about the rooms and objects included in the 3D scene, and your task is to evaluate the quality of the subtitles."
+        "SVQA":"Your answer must be only a overall score.Use 0 to 10 to give the score. You are the quality evaluator of the generated text content, which is a three-round Q&As generated based on the reality of the scenario.You'll be informed about the rooms and objects included in the 3D scene, and your taske is to evaluate the quality of the five rounds QA, including whether they are three rounda of QA, and the quality of the text.",
+        "ConversationObj": "Your answer must be only a overall score. Use 0 to 10 to give the score. Your task is to evaluate the quality of the generated three-round Q&As on an furniture. You will consider the score based on the accuracy and richness of the text. Accuracy refers to whether the description revolves around just one single indoor object and should not revolve around the whole scene, and richness refers to the dimension of the description.",
+        "Relation":"Your answer must only be an overall score. Use 0 to 10 to give the score. You are the quality evaluator of the generated text content, which is a relational inference generated based on the reality of the objects in the scene. You will be informed about objects included in scene, and your task is to evaluate the accuracy of relational reasoning.",
+        "SCaption": "Your answer must be only a overall score.Use 0 to 10 to give the score. You are the quality evaluator of the generated text content, which is a long caption generated based on the reality of the scene. You will be informed about the rooms and objects included in the 3D scene, and your task is to evaluate the quality of the subtitles.",
+        "DescriptionObj": "Your answer must be only a overall score.Use 0 to 10 to give the score. Your task is to evaluate the quality of the text on the description of one unknown object, and you will consider the score based on the accuracy and richness of the text. Accuracy refers to whether the description revolves around just one single indoor object and should not revolve around the whole scene, and richness refers to the dimension of the description."
     }
     # evaluation = [Task_type]
 
@@ -94,34 +113,42 @@ if __name__ == "__main__":
         Eva = json.load(Eva)
         evaluatelist = []
         for a, b in enumerate(Eva):
-            if int(list(b.keys())[0]) != -1:
-                evaluatelist.append(int(list(b.keys())[0]))
+            if b!='None':
+                if list(b.keys())[0] != '-1':
+                    evaluatelist.append(float(list(b.keys())[0]))
+            else:
+                evaluatelist.append(-1)
         print("Scores : "+str(sum(evaluatelist)/len(evaluatelist)))
-        sys.exit()
+        if 'None' not in list(Eva):
+            sys.exit()
     else:
-        Eva = 40*['None']
+        Eva = 10*['None']
         evaluatelist = []
 
     sence = open(path, 'r')
     sence = jsonlines.Reader(sence)
+    # sence = open(path, 'r')
+    # sence = json.load(sence)
 
-    from cli import vicuna
-    from inference import chat
-
-    answer = ''
-    model, tokenizer, chatio = vicuna()
+    # from cli import vicuna
+    # from inference import chat
+    #
+    # answer = ''
+    # model, tokenizer, chatio = vicuna()
 
     for index,inf in enumerate(tqdm(sence)):
+        if len(evaluatelist)!=10:
+            pass
+        elif evaluatelist[index]!=-1:
+            continue
         #不同模型输出id不同
-        # if index not in evaluatelist:
-        #     continue
         pred = inf['text']
         id = inf['id']
         if Level == 'Object':
             id = re.sub(r".*\_", "", id)
             #id = re.sub(r".*\_", "", id[8:])
             id = re.sub(r"\d+.*", "", id)
-            input = '(1) The object is '+ id+ '(2)Generated text is '+pred
+            input = 'Generated text is '+pred
         else:
             file = '(' + str(id) + ').json'
             filepath = os.path.join("/media/kou/Data1/htc/myjson", file)
@@ -134,12 +161,27 @@ if __name__ == "__main__":
             obj = json.load(obj)
             objects = obj[int(id)]
             rooms,boundingbox,states = datatrans(GT)
-            input = "(1)Truth is rooms:"+ str(rooms) +", objects:"+str(objects)+" (2)Generated text is "+pred
+            if Task_type == "Relation":
+                input = "(1)Truth is objects:" + str(
+                    objects) + " (2)Generated text is " + pred
+            else:
+                input = "(1)Truth is rooms:" + str(rooms) + ", objects:" + str(
+                    objects) + " (2)Generated text is " + pred
 
         # input = {"role": "user","content":prompt+'\n'+"(1)"+str(rooms)+'\n'+"(2)"+str(boundingbox)+'\n'+"(3)"+str(states)}
 
         input = sys_prompt[Task_type]+input
-        answer = chat(input, model, tokenizer, chatio)
+        # answer = chat(input, model, tokenizer, chatio)
+
+        completion = client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=[
+                {"role": "system", "content": "You are a helpful assistant."},
+                {"role": "user", "content": input}
+            ]
+        )
+        answer = completion.choices[0].message.content
+
         # 用空格分开所有单词
         words = answer.split()
         # 排除包含 "3D" 的单词
@@ -170,7 +212,7 @@ if __name__ == "__main__":
         #         break
         #
 
-        Eva[id-460] = {score[0]:answer}
+        Eva[index] = {score[0]:answer}
         with open(result_filepath, 'w') as f:
             # 把列表写入到文件里，转换成json格式
             json.dump(Eva, f, indent=4)
