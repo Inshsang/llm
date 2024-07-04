@@ -24,8 +24,8 @@ import openai
 from openai import OpenAI
 
 client = OpenAI(
-    base_url='https://use.52apikey.cn/v1',
-    api_key='sk-t0hsFiTCePfhTgC1399524CdCcE345D08498Ed9dEd453fE9'
+    base_url='',
+    api_key=''
 )
 # completion = client.chat.completions.create(
 #   model="gpt-3.5-turbo",
