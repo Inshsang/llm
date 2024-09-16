@@ -14,7 +14,7 @@ answers_file = ''
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--task_type", type=str, default='VisualGrounding', help="task type" #Detection,Counting,Classification,PositionRelation,
+        "--task_type", type=str, default='RoomDetection', help="task type" #Detection,Counting,Classification,PositionRelation,
                                                                             # VisualGrounding,RoomDetection,Navigation,VisualGrounding_plus
                                                                                 #VQA,Relation,Caption,ConversationObj,DescriptionObj
     )

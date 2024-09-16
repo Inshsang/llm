@@ -95,7 +95,11 @@ def cal_aro_3d(bbox1, bbox2):
     x, y, z = bbox2[:3]
     x1, y1, z1, l, w, h = bbox1
 
-    if x1 - multi <= x <= x1 + multi and y1 - multi <= y <= y1 + multi and z1 - multi <= z <= z1 + multi:
+    # 计算两点之间的欧几里得距离
+    distance = math.sqrt(
+        (x - x1) ** 2 + (y - y1) ** 2 + (z - z1) ** 2)
+
+    if distance<=1:
         return 1
     else:
         return 0

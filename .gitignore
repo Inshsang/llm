@@ -18,7 +18,7 @@
 *.0
 
 # result related
-answers/
+apendix_answers/
 ckpt/
 ckpt3d/
 

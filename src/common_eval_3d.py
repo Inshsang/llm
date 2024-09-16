@@ -10,14 +10,14 @@ import sys
 sys.path.insert(0,'/media/kou/Data1/htc/FastChat/fastchat/serve')
 from torch.utils.data import DataLoader, Dataset
 import openai
-openai.base_url = 'https://api.gpts.vin/v1'
-openai.api_key = 'sk-zhSLBdQLuAKkqLDZDe22058727E34581B48cB1774975D688'
+openai.base_url = 'xxxxxxx'
+openai.api_key = 'xxxxxx'
 
 from openai import OpenAI
 
 client = OpenAI(
-    base_url="https://api.gpts.vin/v1",
-    api_key="sk-zhSLBdQLuAKkqLDZDe22058727E34581B48cB1774975D688"
+    base_url="xxxxxx",
+    api_key="xxxxxx"
 )
 
 Class_ALL = [
@@ -153,87 +153,115 @@ def Navigation(dataset, pred_data, thres=0.5):
 
     print(score / cnt)
 
-#多目标分类
-def grounding3d_eval(dataset, pred_data, thres=0.25):
-    score = 0
-    cnt = 0
-    scene_num = 0
-    Detection = jsonlines.Reader(open("/media/kou/Data1/htc/MYDATA/BenchMark/Task/GT/Detection.json"))
-    new_classdict = {}
-    for i in Detection:
-        flag =0
-        key = list(i.keys())[0]
-        if int(key) < 460 or int(key) > 500:
-            continue
-
-        new_classlist = [new_class for new_class in i[key] if new_class["name"].lower() in ["cabinet","bed","chair","sofa","diningtable","doorway","window","shelf", "painting","countertop","desk","fridge","toilet","sink","garbagecan"]]
-        new_classdict[key] = new_classlist
-    for gt, pred in tqdm(zip(dataset, pred_data), ncols=40):
-        text = pred['text']
-        meta_pre = gt['object']
-        cnt += len(text)
-        box_gt = new_classdict[gt['id']]
-
-        for pred,obj in zip(text,meta_pre):
-            cnt+=1
-            if obj['name'] in pred:
-                for real_box in box_gt:
-                    if obj['name'] in real_box['name'].lower():
-                        iou = cal_aro_3d(obj['BoundingBox'], real_box["BoundingBox"])
-                        if iou>0.5:
-                            score += 1
-
-        # object_names = re.findall(r':(\w+)!', text)
-        # assert gt["id"] == pred["id"]
-        # preding = Pred[gt["id"]]
-        # pred_name = [i['name'] for i in preding]
-        # gt_name = [i['name'] for i in gt_objects]
-        # pred_box = [i['BoundingBox'] for i in preding]
-        # cnt += len(pred_box)  # gt_objects,pred_box
-        # # 按顺序多目标分类
-        # for pred,obj in zip(pred_name,object_names):
-        #     if pred==obj:
-        #         score += 1
-        #         break
-        #只做目标是否检测到
-        # for gt_info in gt_objects:
-        #     if gt_info['name'] in pred_name and gt_info['name'] in object_names:
-        #         class_box = [b for i,b in zip(pred_name,pred_box) if i == gt_info['name']]
-        #         cnt += len(class_box)-1
-        #         for index, point in enumerate(class_box):
-        #             iou = cal_aro_3d(gt_info['BoundingBox'], point)
-        #             if iou > thres:
-        #                 score += 1
-        #                 break
-        scene_num += 1
-    print(scene_num,score / cnt)
-
+# #多目标分类
 # def grounding3d_eval(dataset, pred_data, thres=0.25):
 #     score = 0
 #     cnt = 0
 #     scene_num = 0
-#     for gt, pred in tqdm(zip(dataset, pred_data), ncols=40):
-#         gt_objects = gt["object"]
-#         text = pred['text']
-#         points = parse_bbox_3d_Vis(text)
-#         if len(gt_objects) > 10:
+#     Detection = jsonlines.Reader(open("/media/kou/Data1/htc/MYDATA/BenchMark/Task/GT/Detection.json"))
+#     new_classdict = {}
+#     for i in Detection:
+#         flag =0
+#         key = list(i.keys())[0]
+#         if int(key) < 460 or int(key) > 500:
 #             continue
-#         # if len(points) > 10:
-#         #     continue
-#         cnt += len(points)  # gt_objects,points
-#         for object_info in gt_objects:
-#             if (not classification_acc(object_info['name'].lower(), text.lower())) and (not (object_info['name'].lower() in text.lower())):
-#                 continue
-#             # if not (object_info['label'] in text):
-#             #     continue
-#             for index, point in enumerate(points):
-#                 # iou = cal_iou_3d(object_info['bbox'], point)
-#                 iou = cal_aro_3d(object_info['BoundingBox'], point)
-#                 if iou > thres:
-#                     score += 1
-#                     break
+#
+#         new_classlist = [new_class for new_class in i[key] if new_class["name"].lower() in ["cabinet","bed","chair","sofa","diningtable","doorway","window","shelf", "painting","countertop","desk","fridge","toilet","sink","garbagecan"]]
+#         new_classdict[key] = new_classlist
+#
+#
+#     test = 1
+#     collet_pred = []
+#     if test:
+#         one = {"id":'460'}
+#         text = []
+#         for i in pred_data:
+#             if one["id"] == i['id']:
+#                 text.append(i['text'])
+#             else:
+#                 one["text"] = text
+#                 text = [i['text']]
+#                 collet_pred.append(one)
+#                 one = {"id": i['id']}
+#         one["text"] = text
+#         collet_pred.append(one)
+#
+#         pred_data = collet_pred
+#
+#     for gt, pred in tqdm(zip(dataset, pred_data), ncols=40):
+#         text = pred['text']
+#         meta_pre = gt['object']
+#         cnt += len(text)
+#         box_gt = new_classdict[gt['id']]
+#
+#         for pred,obj in zip(text,meta_pre):
+#             cnt+=1
+#             if obj['name'] in pred:
+#                 for real_box in box_gt:
+#                     if obj['name'] in real_box['name'].lower():
+#                         iou = cal_aro_3d(obj['BoundingBox'], real_box["BoundingBox"])
+#                         if iou>0.5:
+#                             score += 1
+#                             continue
+#
+#         # object_names = re.findall(r':(\w+)!', text)
+#         # assert gt["id"] == pred["id"]
+#         # preding = Pred[gt["id"]]
+#         # pred_name = [i['name'] for i in preding]
+#         # gt_name = [i['name'] for i in gt_objects]
+#         # pred_box = [i['BoundingBox'] for i in preding]
+#         # cnt += len(pred_box)  # gt_objects,pred_box
+#         # # 按顺序多目标分类
+#         # for pred,obj in zip(pred_name,object_names):
+#         #     if pred==obj:
+#         #         score += 1
+#         #         break
+#         #只做目标是否检测到
+#         # for gt_info in gt_objects:
+#         #     if gt_info['name'] in pred_name and gt_info['name'] in object_names:
+#         #         class_box = [b for i,b in zip(pred_name,pred_box) if i == gt_info['name']]
+#         #         cnt += len(class_box)-1
+#         #         for index, point in enumerate(class_box):
+#         #             iou = cal_aro_3d(gt_info['BoundingBox'], point)
+#         #             if iou > thres:
+#         #                 score += 1
+#         #                 break
 #         scene_num += 1
 #     print(scene_num,score / cnt)
+
+def grounding3d_eval(dataset, pred_data, thres=0.25):
+    score = 0
+    cnt = 0
+    scene_num = 0
+    for gt, pred in tqdm(zip(dataset, pred_data), ncols=40):
+        gt_objects = gt["object"]
+        text = pred['text']
+        points = parse_bbox_3d_Vis(text)
+        # if len(gt_objects) > 10:
+        #     continue
+        # if len(points) > 10:
+        #     continue
+        cnt += len(points)  # gt_objects,points
+        for object_info in gt_objects:
+
+            # if (not (object_info['name'].lower() in text.lower())):
+            #     continue
+            if (not (object_info['label'] in text.lower())):
+                continue
+            for index, point in enumerate(points):
+                object_info['bbox'][:3] = (np.asarray(object_info['bbox'][:3])+np.asarray(object_info['bbox'][3:]))/2
+                # point[:3] = np.asarray((point[0],point[2],point[1]))
+                # point[:2] = np.asarray(point[:2])
+                iou = cal_in_3d(object_info['bbox'], point)
+
+                # object_info['BoundingBox'][:3] = (np.asarray(object_info['BoundingBox'][:3]) + np.asarray(
+                #     object_info['BoundingBox'][3:])) / 2
+                # iou = cal_in_3d(object_info['BoundingBox'], point)
+                if iou > thres:
+                    score += 1
+                    break
+        scene_num += 1
+    print(scene_num,score / cnt)
 
 
 #直接对Detection专家检测
@@ -313,51 +341,80 @@ def Rgrounding3d_eval(dataset, pred_data, thres=0.5):
                     break
     print(score / cnt)
 
+
 def Vgrounding3d_eval(dataset, pred_data, thres=0.5):
     score = 0
     cnt = 0
-
-    Detection = jsonlines.Reader(open("/media/kou/Data1/htc/MYDATA/BenchMark/Task/GT/Detection.json"))
-    new_classdict = {}
-    for i in Detection:
-        flag =0
-        key = list(i.keys())[0]
-        if int(key) < 460 or int(key) >= 500:
-            continue
-        new_classlist = [new_class for new_class in i[key] if new_class["name"].lower() in Class_ALL]
-        new_classdict[key] = new_classlist
-
     for gt, pred in tqdm(zip(dataset, pred_data), ncols=40):
         gt_objects = gt['object']
         text = pred['text']
-        cnt += 1  # gt_objects,bbox
-        match = re.search(r'obj(\d+)', text)
-        gtBox = new_classdict[gt['id']]
-        # 直接读obj
-        if match:
-            pre_num = int(match.group(1))
-            gtBox = gtBox[pre_num]['BoundingBox']
-            bboxes = gtBox
+        bboxes = parse_bbox_3d_Vis(text)
+        cnt += 1#gt_objects,bbox
 
-        #直接读xyz
-        bboxes = parse_bbox_2d_Vis(text)
-        if len(bboxes):
-            bboxes = bboxes[0]
-        else:
+        if cnt % 500 == 0:
+            print(cnt,' : ',score / cnt)
+
+        # for object_info in gt_objects:
+        # if not classification_acc(gt_objects['label'], text):
+        #     continue
+        # for bbox in bboxes:
+        if len(bboxes) != 1:
             continue
-
-        # 提取点2的xyz坐标
-        point2_xyz = gt_objects[:3]
-
-        # 计算两点之间的欧几里得距离
-        distance = math.sqrt(
-            (point2_xyz[0] - bboxes[0]) ** 2 + (point2_xyz[1] - bboxes[1]) ** 2 + (point2_xyz[2] - bboxes[2]) ** 2)
-
-        # 判断距离是否小于或等于1
-        if distance <= 1:
+        if len(bboxes[0]) != 6:
+            continue
+        iou = cal_aro_3d(gt_objects, bboxes[0])
+        # if iou > 0:
+        #     print(iou)
+        if iou > thres:
             score += 1
 
     print(score / cnt)
+
+# def Vgrounding3d_eval(dataset, pred_data, thres=0.5):
+#     score = 0
+#     cnt = 0
+#
+#     Detection = jsonlines.Reader(open("/media/kou/Data1/htc/MYDATA/BenchMark/Task/GT/Detection.json"))
+#     new_classdict = {}
+#     for i in Detection:
+#         flag =0
+#         key = list(i.keys())[0]
+#         if int(key) < 460 or int(key) >= 500:
+#             continue
+#         new_classlist = [new_class for new_class in i[key] if new_class["name"].lower() in Class_ALL]
+#         new_classdict[key] = new_classlist
+#
+#     for gt, pred in tqdm(zip(dataset, pred_data), ncols=40):
+#         gt_objects = gt['object']
+#         text = pred['text']
+#         cnt += 1  # gt_objects,bbox
+#         match = re.search(r'obj(\d+)', text)
+#         gtBox = new_classdict[gt['id']]
+#         # 直接读obj
+#         if match:
+#             pre_num = int(match.group(1))
+#             gtBox = gtBox[pre_num]['BoundingBox']
+#             bboxes = gtBox
+#
+#         #直接读xyz
+#         bboxes = parse_bbox_2d_Vis(text)
+#         if len(bboxes):
+#             bboxes = bboxes[0]
+#         else:
+#             continue
+#
+#         # 提取点2的xyz坐标
+#         point2_xyz = gt_objects[:3]
+#
+#         # 计算两点之间的欧几里得距离
+#         distance = math.sqrt(
+#             (point2_xyz[0] - bboxes[0]) ** 2 + (point2_xyz[1] - bboxes[1]) ** 2 + (point2_xyz[2] - bboxes[2]) ** 2)
+#
+#         # 判断距离是否小于或等于1
+#         if distance <= 1:
+#             score += 1
+#
+#     print(score / cnt)
 
 def grounding3d(dataset, pred_data):
     # Vgrounding3d_eval(dataset, pred_data, thres=0.25)
@@ -624,11 +681,11 @@ if __name__ == "__main__":
     root_path = '/media/kou/Data1/'
     # root_path = 'G:\event\htc/'
     parser = argparse.ArgumentParser()
-    parser.add_argument("--dataset-name", default="Mydata")#Lamm,Mydata
-    parser.add_argument("--task-name", default="VisualGrounding_plus")#Detection,Counting,Classification,PositionRelation
+    parser.add_argument("--dataset-name", default="Lamm")#Lamm,Mydata
+    parser.add_argument("--task-name", default="VisualGrounding")#Detection,Counting,Classification,PositionRelation
                                                                 # VisualGrounding,RoomDetection,Navigation
                                                                 #VisualGrounding_plus
-    parser.add_argument('--answer-file', default=root_path+r"htc/LAMM/answers")
+    parser.add_argument('--answer-file', default=root_path+r"htc/LAMM_v0/answers")
     parser.add_argument('--base-data-path', default=root_path+r"htc/MYDATA/BenchMark/Task/Task_Reconstruct/Test")
     # parser.add_argument('--base-data-path', default=root_path+r"htc/MYDATA/BenchMark/Task/Test")
     args = parser.parse_args()
@@ -664,13 +721,15 @@ if __name__ == "__main__":
     elif task_name == 'Classification' or 1:
         file_ext = '.jsonl'
         file_name = task_name  + file_ext
-        args.answer_file = os.path.join(args.answer_file, file_name)
+        # args.answer_file = os.path.join(args.answer_file, file_name)
+        # args.answer_file = "/media/kou/Data1/htc/LAMM_v0/answers/answer/Detection_Mydata.jsonl"
+        args.answer_file = "/media/kou/Data1/htc/LAMM_v0/answers/answer/VisualGrounding_Mydata.jsonl"
         pred_data = jsonlines.Reader(open(args.answer_file, 'rb'))
     elif args.answer_file.endswith('.json'):
         pred_data = json.load(open(args.answer_file,'rb'))
     else:
         file_ext = '.json'
-        file_name = task_name  + file_ext
+        file_name = task_name  + '_'+args.dataset_name+file_ext
         args.answer_file = os.path.join(args.answer_file,task_name, file_name)
         pred_data = json.load(open(args.answer_file, 'rb'))
     print(f'Eval [{args.answer_file}] on {dataset_name}')
