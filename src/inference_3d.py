@@ -14,7 +14,7 @@ answers_file = ''
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--task_type", type=str, default='RoomDetection', help="task type" #Detection,Counting,Classification,PositionRelation,
+        "--task_type", type=str, default='Classification', help="task type" #Detection,Counting,Classification,PositionRelation,
                                                                             # VisualGrounding,RoomDetection,Navigation,VisualGrounding_plus
                                                                                 #VQA,Relation,Caption,ConversationObj,DescriptionObj
     )
@@ -33,14 +33,14 @@ def parse_args():
     parser.add_argument(
         "--encoder_ckpt_path",
         type=str,
-        default="/media/kou/Data3/htc/epcl_scannet_vit-L-14_256tokens_latest.pth",
+        default="/data/HTC/Data/model_zoo/epcl_ckpt/epcl_scannet_vit-L-14_256tokens_latest.pth",
         help="path of vision pretrained model; CLIP use default path in cache",
     )
     parser.add_argument(
         "--vicuna_ckpt_path",
         type=str,
         # required=True,
-        default="/media/kou/Data3/htc/vicuna-7b/",
+        default="/data/HTC/Data/model_zoo/vicuna-7b/Vicuna_7B_v0",
         help="path of LLM, default: Vicuna",
     )
     parser.add_argument(
@@ -51,7 +51,7 @@ def parse_args():
         type=str,
         # default="/media/kou/Data1/htc/LAMM/ckpt/-Llanguage/pytorch_model.pt",
         # default="/media/kou/Data1/htc/LAMM/ckpt/--ALLV0/pytorch_model_ep2.pt",
-        default="/media/kou/Data1/htc/LAMM/ckpt/--ALL1/pytorch_model_ep1.pt",
+        default="/data/HTC/Data/model_zoo/llm/ALL1/pytorch_model_ep1.pt",
         help="path of delta parameters from previous stage; Only matter for stage 2",
     )
     parser.add_argument('--stage', type=int, default=2,)
@@ -72,7 +72,7 @@ def parse_args():
     parser.add_argument('--conv_mode', type=str, default='simple')
     parser.add_argument("--inference-mode", default='common')
     parser.add_argument("--bs", type=int,default=1)
-    parser.add_argument("--base-data-path", default="/media/kou/Data1/htc/LAMM/data")
+    parser.add_argument("--base-data-path", default="/data/HTC/Data/dataset/Benchmark/data")
     parser.add_argument("--answers-dir", default="../answers")
     # parser.add_argument("--dataset-name", required=True)
     # parser.add_argument("--base-data-path", required=True)
@@ -169,7 +169,7 @@ def Class_response(args,
     :param str sys_msg: system message for test
     :return list: list of response
     """
-    pcl_paths[0] = "/media/kou/Data3/htc/Objects_npy/" + pcl_paths[0][39:]
+    pcl_paths[0] = "/data/HTC/Data/dataset/object_npy/" + pcl_paths[0][29:]
     history = predict(
         args=args,
         model=model,
@@ -304,9 +304,9 @@ def main(args):
     # for e in existing:
     #     exist_list.append(e["pcl"][0])
 
-    with open("/media/kou/Data3/htc/dataset/Object/my_test_8192pts_fps.dat", 'rb') as f:
+    with open("/data/HTC/Project/Point-BERT/data/ModelNet/modelnet40_normal_resampled/my_test_8192pts_fps.dat", 'rb') as f:
         list_of_objpoints = pickle.load(f)
-    list_of_class_name = json.load(open("/media/kou/Data3/htc/dataset/Object/my_test.json"))
+    list_of_class_name = json.load(open("/data/HTC/Project/Point-BERT/data/ModelNet/modelnet40_normal_resampled/my_test.json"))
     #删除只有一个点的物体
     list_of_objpoints[0] = [npy for index, npy in enumerate(list_of_objpoints[0]) if index != 773]
     list_of_objpoints[1] = [npy for index,npy in enumerate(list_of_objpoints[1]) if index!=773]
@@ -316,10 +316,10 @@ def main(args):
         obj_lists = [{'name':'Unknown','BoundingBox':[0,0,0,2,2,2]}]
     elif task_name in ["Detection"]:
         args.max_obj = 20
-        Detection_lists = json.load(open("/media/kou/Data1/htc/MYDATA/BenchMark/Task/Task_Reconstruct/Test/Detection.json"))
+        Detection_lists = json.load(open("/data/HTC/Data/dataset/Benchmark/Task/Task_Reconstruct/Test/Detection.json"))
     else:
         args.max_obj = 20
-        obj_lists = json.load(open("/media/kou/Data1/htc/LAMM/data/metadata/" + "Detection" + ".json", 'r'))
+        obj_lists = json.load(open("/data/HTC/Data/dataset/Benchmark/data/metadata/" + "Detection" + ".json", 'r'))
 
 
     ans_list = []
@@ -335,8 +335,8 @@ def main(args):
             response_func = Detection_response
         elif task_name in ['Classification','DescriptionObj','ConversationObj']:
             response_func = Class_response
-            class_num = list_of_class_name.index(data_item['id'][0])
-            index = class_num
+           
+            index = data_item['question_id'][0] - 1
         else:
             response_func = Other_response
 

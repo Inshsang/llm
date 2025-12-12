@@ -39,9 +39,10 @@ class DeepSpeedAgent:
 
         self.ds_engine.backward(loss)
         self.ds_engine.step()
-        pbar.set_description(
-            f"[!] loss: {round(loss.item(), 4)}; token_acc: {round(mle_acc*100, 2)}"
-        )
+        if current_step % self.args.get("print_freq", 100) == 0:
+            pbar.set_description(
+                f"[!] loss: {round(loss.item(), 4)}; token_acc: {round(mle_acc*100, 2)}"
+            )
         pbar.update(1)
         if (
             self.args["local_rank"] == 0

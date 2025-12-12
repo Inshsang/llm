@@ -333,7 +333,7 @@ class LAMMPEFTModel(nn.Module):
 
             # load state dict
             map_location = {'cuda:%d' % 0: 'cuda:%d' % args['local_rank']}
-            state_dict = torch.load("/media/kou/Data1/htc/Point-BERT/experiments/PointTransformer_8192point/ModelNet_models/default/ckpt-last.pth", map_location=map_location)
+            state_dict = torch.load("/data/HTC/Project/Point-BERT/experiments/PointTransformer_8192point/ModelNet_models/test/ckpt-best.pth", map_location=map_location)
             # parameter resume of base model
             # if args.local_rank == 0:
             base_ckpt = {k.replace("module.", ""): v for k, v in state_dict['base_model'].items()}

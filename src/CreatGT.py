@@ -332,12 +332,12 @@ def get_testClass(gt,num):
     classname = re.sub(r".*\d_", "", gt)
     classname = re.sub(r"\d.*", "", classname)
     result["question_id"] = num
-    result["pcl"] = "Objects/"+gt+".npy"
+    result["pcl"] = "objects/"+gt+".npy"
 
     result["id"] = src_id
     result["src_dataset"] = "Mydata"
 
-    path = "/media/kou/Data3/htc/dataset/Object/my_names.json"
+    path = "/data/HTC/Data/dataset/object_add/my_names.json"
     ALL = json.load(open(path,'r'))
     random_number = random.sample(range(0,len(ALL)),5)
     random_class = [ALL[i] for i in random_number]
@@ -373,11 +373,11 @@ def get_trainClass(name):
     classname = re.sub(r".*\d_", "", name)
     classname = re.sub(r"\d.*", "", classname)
 
-    Q = "/media/kou/Data1/htc/MYDATA/BenchMark/Task/Template/Q_Classification.json"
+    Q = "/data/HTC/Data/dataset/Benchmark/Task/Template/Q_Classification.json"
     q = open(Q, 'r')
     Question = json.load(q)
     Question = Question[str(random.randint(0, 29))]
-    A = "/media/kou/Data1/htc/MYDATA/BenchMark/Task/Template/A_Classification.json"
+    A = "/data/HTC/Data/dataset/Benchmark/Task/Template/A_Classification.json"
     a = open(A, 'r')
     Answer = json.load(a)
     Answer = Answer[str(random.randint(0, 29))]
@@ -896,10 +896,10 @@ def Test_Counting():
 ## Train Classification ##
 def Train_Classification():
 
-    result = "/media/kou/Data1/htc/MYDATA/BenchMark/Task/Task_Reconstruct/Temp.json"
+    result = " "
     outjson = []
-    All = json.load(open("/media/kou/Data3/htc/dataset/Object/my_train.json"))
-    for path in All[:4000]:
+    All = json.load(open("/data/HTC/Data/dataset/object_add/my_train.json"))
+    for path in All[:20000]:
         single_out = get_trainClass(path)
         outjson.append(single_out)
     # for root, dirs, files in os.walk("H:\Objects_drc"):
@@ -913,9 +913,9 @@ def Train_Classification():
 ## Test_Classification ##
 def Test_Classification():
     outjson = []
-    result = "/media/kou/Data1/htc/MYDATA/BenchMark/Task/Task_Reconstruct/1.json"
+    result = " "
     num = 0
-    All = json.load(open("/media/kou/Data3/htc/dataset/Object/my_test.json"))
+    All = json.load(open("/data/HTC/Data/dataset/object_add/my_test.json"))
     for path in All:
         num += 1
         single_out = get_testClass(path,num)
@@ -1397,41 +1397,41 @@ Detection_class = ["cabinet","bed","chair","sofa","diningtable","doorway","windo
 
 
 
-# Object GPT Train:SVQA,Relation,SCaption  ##
-import jsonlines
-import re
-GT = jsonlines.Reader(open("/media/kou/Data1/htc/PointLLM/Results/ClassificationVQA/Train/Classification.jsonl"))
-# GT = jsonlines.Reader(open("/media/kou/Data1/htc/PointLLM/Results/ClassificationCaption/Train_class/Classification.jsonl"))
-outjson = []
+# # Object GPT Train:SVQA,Relation,SCaption  ##
+# import jsonlines
+# import re
+# GT = jsonlines.Reader(open("/media/kou/Data1/htc/PointLLM/Results/ClassificationVQA/Train/Classification.jsonl"))
+# # GT = jsonlines.Reader(open("/media/kou/Data1/htc/PointLLM/Results/ClassificationCaption/Train_class/Classification.jsonl"))
+# outjson = []
 
-for gt in GT:
-    #SVQA
-    # gt['query'] = "Generate 5 single-round Q&As about 5 different object in rooms,considering diverse aspects like usage,material,belonged rooms and daily-life knowledge."
-    # SCaption
-    gt["text"] = gt["text"].replace('\ufffd', '')
-    if len(gt["text"])<=600 :
-        continue
-    name = re.sub(r".*\_", "", gt['id'])
-    name = re.sub(r"\d+.*", "", name)
-    gt['pcl'] = 'O'+gt['id'][1:]+".npy"
-    # gt["conversations"] = [{"from": "human",
-    #                         "value":f"Describe this object as detailed as possible, as if the object is right in front of you."},
-    #                        {
-    #                            "from": "gpt",
-    #                            "value": gt["text"]
-    #                        }
-    # ]
-    # gt['task_type'] = 'DescriptionObj3d'
-    gt["conversations"] = [{"from": "human",
-                            "value":f"You need to create three question-and-answer pairs centered around the object, ensuring that the context is interconnected. Format your response as a list,[Q1,A1,Q2,A2,Q3,A3]"},
-                           {
-                               "from": "gpt",
-                               "value": gt["text"]
-                           }
-    ]
-    gt['task_type'] = 'ConversationObj3d'
-    gt['src_dataset'] = "Mydata"
-    outjson.append(gt)
+# for gt in GT:
+#     #SVQA
+#     # gt['query'] = "Generate 5 single-round Q&As about 5 different object in rooms,considering diverse aspects like usage,material,belonged rooms and daily-life knowledge."
+#     # SCaption
+#     gt["text"] = gt["text"].replace('\ufffd', '')
+#     if len(gt["text"])<=600 :
+#         continue
+#     name = re.sub(r".*\_", "", gt['id'])
+#     name = re.sub(r"\d+.*", "", name)
+#     gt['pcl'] = 'O'+gt['id'][1:]+".npy"
+#     # gt["conversations"] = [{"from": "human",
+#     #                         "value":f"Describe this object as detailed as possible, as if the object is right in front of you."},
+#     #                        {
+#     #                            "from": "gpt",
+#     #                            "value": gt["text"]
+#     #                        }
+#     # ]
+#     # gt['task_type'] = 'DescriptionObj3d'
+#     gt["conversations"] = [{"from": "human",
+#                             "value":f"You need to create three question-and-answer pairs centered around the object, ensuring that the context is interconnected. Format your response as a list,[Q1,A1,Q2,A2,Q3,A3]"},
+#                            {
+#                                "from": "gpt",
+#                                "value": gt["text"]
+#                            }
+#     ]
+#     gt['task_type'] = 'ConversationObj3d'
+#     gt['src_dataset'] = "Mydata"
+#     outjson.append(gt)
 
 
 ############################ 扩展的VG Test ##
@@ -1521,7 +1521,7 @@ def VG_Train():
 训练Instruction tuning data
 """
 #Classification
-# result, outjson = Train_Classification()
+result, outjson = Train_Classification()
 #Counting
 # result, outjson = Train_Counting()
 # Detection
@@ -1556,7 +1556,7 @@ def VG_Train():
 # result, outjson = Test_Navigation()
 #PositionRelation
 # result, outjson = Test_PositionRelation()
-result = "/media/kou/Data1/htc/MYDATA/BenchMark/Task/Task_Reconstruct/temp.json"
+result = "/data/HTC/Data/dataset/Benchmark/temp.json"
 with open(result, 'w') as f:
     # 把列表写入到文件里，转换成json格式
     json.dump(outjson, f, indent=4)

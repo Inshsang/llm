@@ -7,10 +7,10 @@ from model import *
 def parser_args():
     parser = argparse.ArgumentParser(description="train parameters for LAMM")
     parser.add_argument(
-        "--cfg", type=str, default="/media/kou/Data1/htc/LAMM/src/config/train_ds3.yaml", help="config file"
+        "--cfg", type=str, default="/data/HTC/Project/llm/src/config/train_ds3.yaml", help="config file"
     )
     parser.add_argument(
-        "--train_stage", type=int, default=2, help="1，2for obj alignment；3 for all"
+        "--train_stage", type=int, default=1, help="1，2for obj alignment；3 for all"
     )
     # data-related configurations
     parser.add_argument(
@@ -18,7 +18,7 @@ def parser_args():
         type=str,
         # default='/media/kou/Data1/htc/LAMM/data/LAMM_3dinstruct_10k.json',
         # default='/media/kou/Data1/htc/MYDATA/BenchMark/Task/Task_Reconstruct/WholeTrain/LLM_train_all.json',
-        default='/media/kou/Data1/htc/MYDATA/BenchMark/Task/Task_Reconstruct/WholeTrain/LLM_train_all_multiroom.json',
+        default='/data/HTC/Data/dataset/Benchmark/Task/Task_Reconstruct/WholeTrain/Classification3d.json',
         # default='/media/kou/Data1/htc/MYDATA/BenchMark/Task/Task_Reconstruct/Train/Classification.json',
         # default='/media/kou/Data1/htc/MYDATA/BenchMark/Task/Task_Reconstruct/Train/ClassificationLong.json',
         # required=True,
@@ -31,7 +31,7 @@ def parser_args():
         "--max_obj_len", type=int, default=12, help="Root dir for images"
     )
     parser.add_argument(
-        "--vision_root_path", type=str, default='/media/kou/Data1/htc/LAMM/data', help="Root dir for images"
+        "--vision_root_path", type=str, default='/data/HTC/Data/dataset', help="Root dir for images"
     )
     parser.add_argument(
         "--max_tgt_len",
@@ -53,8 +53,8 @@ def parser_args():
         help="whether to use system messages",
     )
     parser.add_argument("--local_rank", default=0, type=int)
-    parser.add_argument("--save_path", default='../ckpt/exe/',type=str, help="directory to save checkpoints")
-    parser.add_argument("--log_path",  default='../ckpt/log_rest/',type=str, help="directory to save logs")
+    parser.add_argument("--save_path", default='/data/HTC/Data/model_zoo/llm_exe/ckpt/exe/',type=str, help="directory to save checkpoints")
+    parser.add_argument("--log_path",  default='/data/HTC/Data/model_zoo/llm_exe/ckpt/log_rest/',type=str, help="directory to save logs")
     # model-related configurations
     parser.add_argument(
         "--model", type=str, default="lamm_peft", help="Model class to use"
@@ -69,13 +69,13 @@ def parser_args():
     parser.add_argument(
         "--encoder_ckpt_path",
         type=str,
-        default='/media/kou/Data3/htc/epcl_scannet_vit-L-14_256tokens_latest.pth',
+        default='/data/HTC/Data/model_zoo/epcl_ckpt/epcl_scannet_vit-L-14_256tokens_latest.pth',
         help="path of vision pretrained model; CLIP use default path in cache",
     )
     parser.add_argument(
         "--vicuna_ckpt_path",
         type=str,
-        default='/media/kou/Data3/htc/vicuna-7b/',
+        default='/data/HTC/Data/model_zoo/vicuna-7b/Vicuna_7B_v0/',
         #required=True,
         help="path of LLM, default: Vicuna",
     )

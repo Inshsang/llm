@@ -30,11 +30,13 @@ class LAMM_EVAL_3D(Dataset):
         if self.task_name=='Detection' and self.dataset_name=="Lamm":
             json_path = "/media/kou/Data1/htc/LAMM_v0/data/3D_Benchmark/meta_file/Detection_ScanNet.json"
         elif self.task_name=='Detection' and self.dataset_name !="Lamm":
-            json_path ="/media/kou/Data1/htc/MYDATA/BenchMark/Task/Task_Reconstruct/Test/Detection.json"
+            json_path ="/data/HTC/Data/dataset/Benchmark/Task/Task_Reconstruct/Test/Detection.json"
         elif self.task_name == 'VisualGrounding' and self.dataset_name != "Lamm":
-            json_path = "/media/kou/Data1/htc/MYDATA/BenchMark/Task/Task_Reconstruct/Test/VisualGrounding.json"
+            json_path = "/data/HTC/Data/dataset/Benchmark/data/meta_file/VisualGrounding.json"
+        elif self.task_name=='Classification':
+            json_path = "/data/HTC/Data/dataset/Benchmark/Task/Task_Reconstruct/Test/Classification.json"
         else:
-            json_path = "//media/kou/Data1/htc/LAMM_v0/data/3D_Benchmark/meta_file/VG_ScanRefer.json"
+            json_path = "/data/HTC/Data/dataset/Benchmark/data/meta_file/VG_ScanRefer.json"
         self.data = json.load(open(json_path, 'rb'))
 
     def __len__(self):

@@ -678,15 +678,15 @@ def collate_fn(batch):
     return res
 
 if __name__ == "__main__":
-    root_path = '/media/kou/Data1/'
+    root_path = '/data/HTC/'
     # root_path = 'G:\event\htc/'
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset-name", default="Lamm")#Lamm,Mydata
-    parser.add_argument("--task-name", default="VisualGrounding")#Detection,Counting,Classification,PositionRelation
+    parser.add_argument("--task-name", default="Classification")#Detection,Counting,Classification,PositionRelation
                                                                 # VisualGrounding,RoomDetection,Navigation
                                                                 #VisualGrounding_plus
-    parser.add_argument('--answer-file', default=root_path+r"htc/LAMM_v0/answers")
-    parser.add_argument('--base-data-path', default=root_path+r"htc/MYDATA/BenchMark/Task/Task_Reconstruct/Test")
+    parser.add_argument('--answer-file', default=root_path+r"Project/llm/answers")
+    parser.add_argument('--base-data-path', default=root_path+r"dataset/Benchmark/Task/Task_Reconstruct/Test")
     # parser.add_argument('--base-data-path', default=root_path+r"htc/MYDATA/BenchMark/Task/Test")
     args = parser.parse_args()
    
@@ -721,9 +721,9 @@ if __name__ == "__main__":
     elif task_name == 'Classification' or 1:
         file_ext = '.jsonl'
         file_name = task_name  + file_ext
-        # args.answer_file = os.path.join(args.answer_file, file_name)
+        args.answer_file = os.path.join(args.answer_file, 'ALL1',file_name)
         # args.answer_file = "/media/kou/Data1/htc/LAMM_v0/answers/answer/Detection_Mydata.jsonl"
-        args.answer_file = "/media/kou/Data1/htc/LAMM_v0/answers/answer/VisualGrounding_Mydata.jsonl"
+        # args.answer_file = "/media/kou/Data1/htc/LAMM_v0/answers/answer/VisualGrounding_Mydata.jsonl"
         pred_data = jsonlines.Reader(open(args.answer_file, 'rb'))
     elif args.answer_file.endswith('.json'):
         pred_data = json.load(open(args.answer_file,'rb'))
