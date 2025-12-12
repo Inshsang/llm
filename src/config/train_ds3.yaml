@@ -11,7 +11,7 @@ models:
       test_dataset: SelfInstructTestDataset
 
 # ========= Global configuration ========== #
-logging_step: 5
+logging_step: 50
 # ========= Global configuration ========== #
 
 # generation hyper-parameters
