@@ -623,25 +623,7 @@ class LAMMPEFTModel(nn.Module):
             if self.vision_feature_type == "global":
                 raise NotImplementedError("Global feature not implemented for pcl")
             elif self.vision_feature_type == "local":
-                fixed_objs = []
-                for obj in obj_list:
-                    pts = np.asarray(obj, dtype=np.float32)
-
-                    # 点数不足：重复补点
-                    if pts.shape[0] < 8192:
-                        repeat = 8192 // pts.shape[0] + 1
-                        pts = np.tile(pts, (repeat, 1))
-
-                    # 随机采样到 8192
-                    idx = np.random.choice(pts.shape[0], 1024, replace=False)
-                    pts = pts[idx]
-
-                    fixed_objs.append(pts)
-
-                objs = torch.tensor(np.stack(fixed_objs)) \
-                    .to(self.llama_model.dtype) \
-                    .to(device)
-                # objs = torch.tensor(np.asarray(obj_list)).to(self.llama_model.dtype).to(device)
+                objs = torch.tensor(np.asarray(obj_list)).to(self.llama_model.dtype).to(device)
                 embedding = self.point_backbone(objs)
 
         atts_llama = torch.ones(embedding.size()[:-1], dtype=torch.long).to(
