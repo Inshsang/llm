@@ -304,7 +304,7 @@ def main(args):
     # for e in existing:
     #     exist_list.append(e["pcl"][0])
 
-    with open("/data/HTC/Project/Point-BERT/data/ModelNet/modelnet40_normal_resampled/my_test_8192pts_fps.dat", 'rb') as f:
+    with open("/data/HTC/Project/Point-BERT/data/ModelNet/modelnet40_normal_resampled/my_test_1024pts_fps.dat", 'rb') as f:
         list_of_objpoints = pickle.load(f)
     list_of_class_name = json.load(open("/data/HTC/Project/Point-BERT/data/ModelNet/modelnet40_normal_resampled/my_test.json"))
     #删除只有一个点的物体

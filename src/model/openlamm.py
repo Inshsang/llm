@@ -417,7 +417,7 @@ class LAMMPEFTModel(nn.Module):
 
         elif self.train_stage == 2:
             # 加载保存的参数
-            llama_proj = torch.load("/media/kou/Data1/htc/LAMM/ckpt/llama_projcetion/llama_proj_v1.pth")
+            llama_proj = torch.load("/data/HTC/Data/model_zoo/llm/llama_projcetion/llama_proj_v1.pth")
             processed_llama = {key.replace("llama_proj.", ""): value for key, value in llama_proj.items()}
             # 加载参数到llama_pro层
             self.llama_proj.load_state_dict(processed_llama)
