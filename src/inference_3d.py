@@ -272,7 +272,7 @@ def Detection_response(args,
 
 
 def main(args):
-    # load model
+    # # load model
     model = LAMMPEFTModel(**args.__dict__)
     delta_ckpt = torch.load(args.delta_ckpt_path, map_location=torch.device('cpu'))
     model.load_state_dict(delta_ckpt, strict=False)
@@ -308,8 +308,8 @@ def main(args):
         list_of_objpoints = pickle.load(f)
     list_of_class_name = json.load(open("/data/HTC/Project/Point-BERT/data/ModelNet/modelnet40_normal_resampled/my_test.json"))
     #删除只有一个点的物体
-    list_of_objpoints[0] = [npy for index, npy in enumerate(list_of_objpoints[0]) if index != 773]
-    list_of_objpoints[1] = [npy for index,npy in enumerate(list_of_objpoints[1]) if index!=773]
+    list_of_objpoints[0] = [npy for index, npy in enumerate(list_of_objpoints[0])]
+    list_of_objpoints[1] = [npy for index,npy in enumerate(list_of_objpoints[1])]
 
     if task_name in ['Classification','DescriptionObj','ConversationObj']:
         args.max_obj = 12
@@ -325,12 +325,12 @@ def main(args):
     ans_list = []
     ans_file = open(os.path.splitext(answers_file)[0] + '.jsonl', 'w')
     for index,data_item in enumerate(tqdm(dataloader)):
-        if index>=1385:
+        if index>=1385 and task_name == 'Detection':
             continue
         prompt = data_item['query']
         pcl_paths = data_item['pcl']
 
-        if task_name == 'Detection':    #多目标分类只输入多个物体(从场景中割除)，训练也是如此
+        if task_name == 'Detection':    #多目标分类只输入单个物体(从场景中割出区别于分类任务)，训练也是如此
             obj_lists = Detection_lists[index]['object']
             response_func = Detection_response
         elif task_name in ['Classification','DescriptionObj','ConversationObj']:

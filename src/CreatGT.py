@@ -901,12 +901,12 @@ def Train_Classification():
     All = json.load(open("/data/HTC/Data/dataset/object_add/my_train.json"))
     for path in All[:20000]:
         single_out = get_trainClass(path)
+        
+        # #训练集增加选项classification
+        # single_test_out = get_testClass(path,0)
+        # single_out['conversations'][0]['value'] = single_test_out['query']
+
         outjson.append(single_out)
-    # for root, dirs, files in os.walk("H:\Objects_drc"):
-    #     for file in files:
-    #         print(file)
-    #         single_out = get_trainClass(file)
-    #         outjson.append(single_out)
 
     return result,outjson
 

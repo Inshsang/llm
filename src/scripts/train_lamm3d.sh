@@ -8,10 +8,10 @@ now=$(date +"%Y%m%d_%H%M%S")
 
 ckpt_dir=/data/HTC/Data/model_zoo/llm_exe
 mkdir -p ${ckpt_dir}/${exp}/log_rest/
-deepspeed --include localhost:2,3 --master_addr 127.0.0.1 --master_port 28451 train.py \
-    # --stage 1 \
+deepspeed --include localhost:1,2 --master_addr 127.0.0.1 --master_port 28451 train.py \
+    --train_stage 2 \
     --cfg /data/HTC/Project/llm/src/config/train_ds3.yaml \
-    --data_path  /data/HTC/Data/dataset/Benchmark/Task/Task_Reconstruct/WholeTrain/Classification3d.json \
+    --data_path  /data/HTC/Data/dataset/Benchmark/Task/Task_Reconstruct/WholeTrain/Classification3d_demo.json \
     --vision_root_path /data/HTC/Data/dataset \
     --vision_type pcl \
     --use_system \

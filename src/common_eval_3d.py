@@ -721,7 +721,7 @@ if __name__ == "__main__":
     elif task_name == 'Classification' or 1:
         file_ext = '.jsonl'
         file_name = task_name  + file_ext
-        args.answer_file = os.path.join(args.answer_file, 'ALL1',file_name)
+        args.answer_file = os.path.join(args.answer_file, 'classfication_demo',file_name)
         # args.answer_file = "/media/kou/Data1/htc/LAMM_v0/answers/answer/Detection_Mydata.jsonl"
         # args.answer_file = "/media/kou/Data1/htc/LAMM_v0/answers/answer/VisualGrounding_Mydata.jsonl"
         pred_data = jsonlines.Reader(open(args.answer_file, 'rb'))

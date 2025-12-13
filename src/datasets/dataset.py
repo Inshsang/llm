@@ -329,14 +329,14 @@ class LAMMDataset(Dataset):
             self.task_type_list.append(task_type)
 
         self.num2name = json.load(open("/data/HTC/Data/dataset/object_add/my_names.json"))
-        with open("/data/HTC/Project/Point-BERT/data/ModelNet/modelnet40_normal_resampled/my_train_8192pts_fps.dat", 'rb') as f:
+        with open("/data/HTC/Project/Point-BERT/data/ModelNet/modelnet40_normal_resampled/my_train_1024pts_fps.dat", 'rb') as f:
             self.list_of_objpoints = pickle.load(f)
 
         class_map = json.load(open("/data/HTC/Project/Point-BERT/data/ModelNet/modelnet40_normal_resampled/my_train.json"))
         # self.map_class2points = {vision_root_path+'/object_npy/'+class_map[i]+".npy": "/media/kou/Data3/htc/Objects_8192_npy/points/" + str(i) + ".npy" for i in range(len(class_map))}
         # self.map_class2labels = {vision_root_path+'/object_npy/'+class_map[i]+".npy": "/media/kou/Data3/htc/Objects_8192_npy/labels/" + str(i) + ".npy" for i in range(len(class_map))}
-        self.map_class2points = {vision_root_path+'/Objects/'+class_map[i]+".npy": vision_root_path + '/object_npy/' + class_map[i] + ".npy" for i in range(len(class_map))}
-        self.map_class2labels = {vision_root_path+'/Objects/'+class_map[i]+".npy": vision_root_path + '/object_npy/' + class_map[i] + ".npy" for i in range(len(class_map))}
+        self.map_class2points = {vision_root_path+'/Objects/'+class_map[i]+".npy": vision_root_path + '/object_1024_npy/' + class_map[i] + ".npy" for i in range(len(class_map))}
+        self.map_class2labels = {vision_root_path+'/Objects/'+class_map[i]+".npy": vision_root_path + '/object_1024_npy/' + class_map[i] + ".npy" for i in range(len(class_map))}
         self.scene_gt = {}
         index = -1
         self.VG = json.load(open("/data/HTC/Data/dataset/Benchmark/Task/GT/VisualGrounding.json", "r"))
