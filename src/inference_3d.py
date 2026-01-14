@@ -14,7 +14,7 @@ answers_file = ''
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--task_type", type=str, default='Classification', help="task type" #Detection,Counting,Classification,PositionRelation,
+        "--task_type", type=str, default='Counting', help="task type" #Detection,Counting,Classification,PositionRelation,
                                                                             # VisualGrounding,RoomDetection,Navigation,VisualGrounding_plus
                                                                                 #VQA,Relation,Caption,ConversationObj,DescriptionObj
     )
@@ -44,14 +44,14 @@ def parse_args():
         help="path of LLM, default: Vicuna",
     )
     parser.add_argument(
-        "--train_stage", type=int, default=2, help="1，2for obj alignment；3 for all"
+        "--train_stage", type=int, default=2, help="1 for obj alignment;2for test；3 for fintune"
     )
     parser.add_argument(
         "--delta_ckpt_path",
         type=str,
         # default="/media/kou/Data1/htc/LAMM/ckpt/-Llanguage/pytorch_model.pt",
         # default="/media/kou/Data1/htc/LAMM/ckpt/--ALLV0/pytorch_model_ep2.pt",
-        default="/data/HTC/Data/model_zoo/llm/ALL1/pytorch_model_ep1.pt",
+        default="/data/HTC/Data/model_zoo/llm_v1/ALL1/pytorch_model_ep1.pt",
         help="path of delta parameters from previous stage; Only matter for stage 2",
     )
     parser.add_argument('--stage', type=int, default=2,)
@@ -207,7 +207,7 @@ def Other_response(args,
     :param str sys_msg: system message for test
     :return list: list of response
     """
-    src_id = pcl_paths[0][37:-4]
+    src_id = pcl_paths[0][44:-4]
     history = predict(
         args=args,
         model=model,
@@ -246,7 +246,7 @@ def Detection_response(args,
     :param str sys_msg: system message for test
     :return list: list of response
     """
-    src_id = pcl_paths[0][37:-4]
+    src_id = pcl_paths[0][44:-4]
     input = ["What's the 3D point cloud about?"]
     num = len(obj_lists)
     ans_list = []
@@ -274,12 +274,12 @@ def Detection_response(args,
 def main(args):
     # # load model
     model = LAMMPEFTModel(**args.__dict__)
-    delta_ckpt = torch.load(args.delta_ckpt_path, map_location=torch.device('cpu'))
-    model.load_state_dict(delta_ckpt, strict=False)
-    print(f'[!] merging LoRA weights ...')
-    model.llama_model = model.llama_model.merge_and_unload()
-    model = model.eval().half().cuda()
-    Visualization(model).structure_graph()
+    # delta_ckpt = torch.load(args.delta_ckpt_path, map_location=torch.device('cpu'))
+    # model.load_state_dict(delta_ckpt, strict=False)
+    # print(f'[!] merging LoRA weights ...')
+    # model.llama_model = model.llama_model.merge_and_unload()
+    # model = model.eval().half().cuda()
+    # Visualization(model).structure_graph()
     print(f'[!] init the LLM over ...')
     
     # load data

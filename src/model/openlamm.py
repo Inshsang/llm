@@ -426,21 +426,13 @@ class LAMMPEFTModel(nn.Module):
             self.llama_proj.eval()
             print("Froeze llama_proj.")
         elif self.train_stage == 3:
-            #冻结llm
-            for name, param in self.llama_model.named_parameters():
-                param.requires_grad = False
-            self.llama_model.print_trainable_parameters()
+            # 微调pro和llm
+            # 加载保存的参数
+            llama_proj = torch.load("/data/HTC/Data/model_zoo/llm_exe/projector/llama_proj1.pth",map_location="cpu")
+            processed_llama = {key.replace("llama_proj.", ""): value for key, value in llama_proj.items()}
+            self.llama_proj.load_state_dict(processed_llama)
 
-            self.llama_proj = nn.Sequential(
-                # nn.Linear(self.trans_dim * 2, 256),
-                nn.ReLU(inplace=True),
-                nn.Dropout(0.5),
-                nn.Linear(256, self.llama_model.config.hidden_size)
-            )
-            # self.llama_proj = nn.Linear(
-            #     256, self.llama_model.config.hidden_size
-            # )
-            print("########################Initial llama_proj##########################")
+            print("######################## Initial llama_proj and LLM ##########################")
 
         self.llama_tokenizer = LlamaTokenizer.from_pretrained(
             vicuna_ckpt_path, use_fast=False
@@ -1058,21 +1050,13 @@ class LAMMPEFTModel(nn.Module):
         stopping_criteria = StoppingCriteriaList(
             [LAMMStoppingCriteria([[2277, 29937], [835]], input_embeds)]
         )
-        # Respect caller choice; default to sampling to preserve legacy behavior.
-        do_sample = inputs.get("do_sample", True)
-        top_p = inputs.get("top_p", 1.0)
-        temperature = inputs.get("temperature", 1.0)
-        # Clamp to safe ranges to avoid transformer warpers throwing.
-        top_p = min(max(top_p, 1e-5), 1.0)
-        temperature = max(temperature, 1e-5)
-
         outputs = self.llama_model.generate(
             inputs_embeds=input_embeds,
             attention_mask=input_masks,
             max_new_tokens=inputs["max_tgt_len"],
-            top_p=top_p,
-            temperature=temperature,
-            do_sample=do_sample,
+            top_p=inputs["top_p"],
+            temperature=inputs["temperature"],
+            do_sample=True,
             use_cache=True,
             stopping_criteria=stopping_criteria,
         )

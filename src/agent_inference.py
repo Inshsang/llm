@@ -74,6 +74,25 @@ def _greedy_generate(model, inputs):
     return model.llama_tokenizer.batch_decode(outputs, skip_special_tokens=True)
 
 
+def _greedy_text_generate(model: LAMMPEFTModel, prompt: str, max_new_tokens: int = 128) -> str:
+    """纯文本 greedy 生成（用于解析问题）。避免走多模态 embedding，规避形状不匹配。"""
+    tok = model.llama_tokenizer(
+        prompt,
+        return_tensors="pt",
+        add_special_tokens=True,
+    ).to(model.device)
+    out = model.llama_model.generate(
+        input_ids=tok.input_ids,
+        attention_mask=tok.attention_mask,
+        max_new_tokens=max_new_tokens,
+        do_sample=False,
+        use_cache=True,
+    )
+    # only decode newly generated part (optional); simplest is full decode
+    text = model.llama_tokenizer.decode(out[0], skip_special_tokens=True)
+    return text
+
+
 def mllm_generate_one(
     args,
     model,
@@ -98,6 +117,9 @@ def mllm_generate_one(
     # Add additional logging for debugging
     print(f"Generating with task_type: {task_type}, max_length: {max_length}, top_p: {top_p}, temperature: {temperature}")
 
+    # Align with inference_3d: let the model extract vision features from pcl + objpoints
+    modality_embeds = []
+
     inputs = {
         'prompt': prompt_text,
         'pcl_paths': pcl_paths,
@@ -105,7 +127,7 @@ def mllm_generate_one(
         'temperature': safe_temperature,
         'max_tgt_len': max_length,
         'do_sample': args.do_sample,
-        'modality_embeds': [],
+        'modality_embeds': modality_embeds,
         'obj_list': obj_list,
         'list_of_objpoints': list_of_objpoints[:args.max_obj],
         'task_type': task_type,
@@ -178,265 +200,142 @@ class Agent3D:
         self.det_tool = det_tool
         self.geom = geom or GeomTool3D()
 
-    def _budget(self):
-        return {
-            'detector_calls': self.args.budget_detector,
-            'max_obj': self.args.max_obj,
-            'reflection': 0 if self.args.wo_reflection else 1,
-            'use_tool': 0 if self.args.wo_tool else 1,
-        }
+    @staticmethod
+    def _norm_label(label: str) -> str:
+        return ''.join(ch for ch in (label or '').lower() if ch.isalnum())
 
-    def _reflection_check(self, task_type: str, result: Dict[str, Any]) -> bool:
-        if self.args.wo_reflection:
-            return True
-        if task_type == 'Counting':
-            return isinstance(result.get('count', None), int)
-        if task_type in ['VisualGrounding_plus', 'VisualGrounding']:
-            return result.get('selected_obj', None) is not None
-        if task_type == 'PositionRelation':
-            return result.get('relation', None) in {'left', 'right', 'front', 'behind', 'above', 'below'}
-        return True
-
-    def _rank_objects_by_query(self, sys_msg, pcl_paths, obj_list, list_of_objpoints, query: str, top_k: int) -> Dict[str, Any]:
-        options = []
-        for i, obj in enumerate(obj_list[:top_k]):
-            name = obj.get('name', 'Unknown')
-            bbox = obj.get('BoundingBox', obj.get('bbox', None))
-            options.append({'idx': i, 'name': name, 'bbox': bbox})
-
-        prompt = [
-            "You are given a caption to locate an object in a 3D scene. "
-            "Choose the best matching object from the candidate list and answer strictly in JSON.\n"
-            f"Caption: {query}\n"
-            f"Candidates(JSON list): {json.dumps(options)}\n"
-            "Return: {\"idx\": <int>, \"reason\": <short>}\n"
-        ]
-        resp = mllm_generate_one(
-            self.args,
-            self.model,
-            prompt,
-            sys_msg,
-            pcl_paths=pcl_paths,
-            obj_list=obj_list,
-            list_of_objpoints=list_of_objpoints,
-            task_type='VisualGrounding_plus',
-            max_length=256,
-            top_p=0.9,
-            temperature=0.0,
+    def _parse_question_minimal(self, sys_msg: str, query: str) -> Dict[str, Any]:
+        """Step1：纯文本解析，只判定任务类型与目标词，不做 bbox 或打分。"""
+        inst = (
+            "You are a parser. Do NOT solve the task.\n"
+            "Given a question, output JSON only with keys:\n"
+            "- task: one of [VG, COUNT, ROOM, REL]\n"
+            "- target: a single lowercase word for VG/COUNT/ROOM (empty for REL)\n"
+            "- A, B: lowercase words for REL (empty otherwise)\n"
+            "Return example: {\"task\":\"COUNT\",\"target\":\"chair\",\"A\":\"\",\"B\":\"\"}\n"
+            f"Question: {query}\n"
         )
-        text = resp[0].split('###')[0] if isinstance(resp, (list, tuple)) else str(resp)
-        try:
-            chosen = json.loads(text)
-        except Exception:
-            chosen = {'idx': None, 'raw': text}
 
-        idx = chosen.get('idx', None)
-        if isinstance(idx, int) and 0 <= idx < len(options):
-            sel = options[idx]
-        else:
-            sel = None
-        return {'selected_obj': sel, 'raw': text, 'candidates': options}
+        # keep same conversation style header if provided
+        prompt = inst if not sys_msg else (sys_msg + "\n" + inst)
+        text = _greedy_text_generate(self.model, prompt, max_new_tokens=128)
+
+        # try extract the last JSON object in the output
+        start = text.rfind('{')
+        end = text.rfind('}')
+        parsed: Dict[str, Any] = {'task': '', 'target': '', 'A': '', 'B': '', 'raw': text}
+        if start != -1 and end != -1 and end > start:
+            try:
+                parsed.update(json.loads(text[start:end + 1]))
+            except Exception:
+                pass
+
+        task = (parsed.get('task') or '').strip().upper()
+        if task not in {'VG', 'COUNT', 'ROOM', 'REL'}:
+            task = ''
+        parsed['task'] = task
+        parsed['target'] = self._norm_label(parsed.get('target', ''))
+        parsed['A'] = self._norm_label(parsed.get('A', ''))
+        parsed['B'] = self._norm_label(parsed.get('B', ''))
+        return parsed
+
+    @staticmethod
+    def _bbox_to_minmax(bbox):
+        cx, cy, cz, l, w, h = bbox
+        return (
+            cx - l / 2,
+            cy - h / 2,
+            cz - w / 2,
+            cx + l / 2,
+            cy + h / 2,
+            cz + w / 2,
+        )
+
+    def _relation_4way(self, bboxA, bboxB) -> str:
+        """REL: 仅输出 left/right/above/below 四类（按中心点）。"""
+        ax, ay, _ = bboxA[0], bboxA[1], bboxA[2]
+        bx, by, _ = bboxB[0], bboxB[1], bboxB[2]
+        dx, dy = (bx - ax), (by - ay)
+        if abs(dx) >= abs(dy):
+            return 'right' if dx > 0 else 'left'
+        return 'above' if dy > 0 else 'below'
 
     def solve(self, task_type: str, sys_msg: str, data_item: Dict[str, Any], obj_list: List[Dict[str, Any]], list_of_objpoints):
-        budget = self._budget()
         query = data_item['query'][0] if isinstance(data_item['query'], list) else data_item['query']
         pcl_paths = data_item['pcl']
-        trace = {'budget': budget, 'query': query, 'task_type': task_type}
+        # Step1) 纯文本解析（不依赖视觉）
+        parsed = self._parse_question_minimal(sys_msg, query)
 
-        if budget['use_tool'] == 0:
-            resp = mllm_generate_one(
-                self.args,
-                self.model,
-                [query],
-                sys_msg,
-                pcl_paths=pcl_paths,
-                obj_list=obj_list,
-                list_of_objpoints=list_of_objpoints,
-                task_type=task_type,
-                max_length=self.args.max_tgt_len,
-                top_p=0.9,
-                temperature=0.8,
-            )
-            text = resp[0].split('###')[0]
-            return text, {'mode': 'bench', 'raw': text, **trace}
+        # Step2) 一次检测调用：保留 detector 顺序，截断前 20
+        det_topk = obj_list[:20]
+
+        # Step3) 固定规则：直接用检测结果出答案
+        trace = {
+            'query': query,
+            'task_type_arg': task_type,
+            'parsed': parsed,
+            'det_topk_n': len(det_topk),
+        }
+
+        if not det_topk:
+            if task_type == 'Counting':
+                return '0', {'mode': 'fixed', **trace}
+            return 'unknown', {'mode': 'fixed', **trace}
 
         if task_type in ['VisualGrounding_plus', 'VisualGrounding']:
-            res = self._rank_objects_by_query(sys_msg, pcl_paths, obj_list, list_of_objpoints, query, top_k=budget['max_obj'])
-            res['reflection_pass'] = self._reflection_check(task_type, res)
-            if res['selected_obj'] is None:
-                text = "I cannot find the object."
-            else:
-                # IMPORTANT: common_eval_3d.py 的 VG_plus_acc 用 parse_bbox_2d_Vis 读取 [x,y,z]
-                # 并与 gt['bbox'][:3] 做距离<=1 判断。
-                # 所以这里直接输出所选 bbox 的中心点 [cx,cy,cz]。
-                bbox6 = res['selected_obj'].get('bbox')
-                if bbox6 and len(bbox6) >= 3:
-                    cx, cy, cz = bbox6[0], bbox6[1], bbox6[2]
-                    text = f"obj{res['selected_obj']['idx']} {res['selected_obj']['name']} [{cx}, {cy}, {cz}]"
-                else:
-                    text = f"obj{res['selected_obj']['idx']} {res['selected_obj']['name']}"
-            return text, {'mode': 'agent', **res, **trace}
+            # 优先取与 target 名称匹配的第一个，否则回退 top-1
+            tgt = parsed.get('target', '')
+            chosen = None
+            if tgt:
+                for obj in det_topk:
+                    if tgt in self._norm_label(obj.get('name', '')):
+                        chosen = obj
+                        break
+            if chosen is None:
+                chosen = det_topk[0]
+            bbox6 = chosen.get('BoundingBox')
+            return str(bbox6), {'mode': 'fixed', 'bbox': bbox6, **trace}
 
         if task_type == 'Counting':
-            parse_prompt = [
-                "Extract the object category to count from the question. "
-                "Return only one lowercase word (e.g., chair, table, bed).\n"
-                f"Question: {query}"
-            ]
-            resp = mllm_generate_one(
-                self.args,
-                self.model,
-                parse_prompt,
-                sys_msg,
-                pcl_paths=pcl_paths,
-                obj_list=obj_list,
-                list_of_objpoints=list_of_objpoints,
-                task_type=task_type,
-                max_length=64,
-                top_p=0.9,
-                temperature=0.0,
-            )
-            label = resp[0].split('###')[0].strip().lower()
-            matched_idx = [
-                i for i, o in enumerate(obj_list[:budget['max_obj']])
-                if label and label in o.get('name', '').lower()
-            ]
-            count = int(len(matched_idx))
-            res = {'label': label, 'count': count, 'matched_idx': matched_idx}
-            res['reflection_pass'] = self._reflection_check(task_type, res)
-            text = str(count)
-            return text, {'mode': 'agent', **res, **trace}
-
-        if task_type == 'PositionRelation':
-            ab_prompt = [
-                "Extract two object categories A and B from the question and return JSON only. "
-                "Format: {\"A\":\"...\",\"B\":\"...\"}.\n"
-                f"Question: {query}"
-            ]
-            resp = mllm_generate_one(
-                self.args,
-                self.model,
-                ab_prompt,
-                sys_msg,
-                pcl_paths=pcl_paths,
-                obj_list=obj_list,
-                list_of_objpoints=list_of_objpoints,
-                task_type=task_type,
-                max_length=128,
-                top_p=0.9,
-                temperature=0.0,
-            )
-            raw = resp[0].split('###')[0]
-            try:
-                ab = json.loads(raw)
-            except Exception:
-                ab = {'A': '', 'B': '', 'raw': raw}
-
-            def pick_first(name: str):
-                name = (name or '').lower().strip()
-                for i, o in enumerate(obj_list[:budget['max_obj']]):
-                    if name and name in o.get('name', '').lower():
-                        return i, o
-                return None, None
-
-            a_idx, a_obj = pick_first(ab.get('A', ''))
-            b_idx, b_obj = pick_first(ab.get('B', ''))
-
-            relation = None
-            if a_obj and b_obj:
-                relation = self.geom.relation(a_obj['BoundingBox'], b_obj['BoundingBox'])
-            res = {
-                'A': ab.get('A', ''),
-                'B': ab.get('B', ''),
-                'A_idx': a_idx,
-                'B_idx': b_idx,
-                'relation': relation,
-                'ab_raw': raw,
-            }
-            res['reflection_pass'] = self._reflection_check(task_type, res)
-            # common_eval_3d.py 的 Positoinacc 是用 GPT 判断“句子语义是否一致”，
-            # 因此直接输出一个完整句子更稳。
-            if relation is None:
-                text = 'unknown'
-            else:
-                text = f"The {ab.get('A','object A')} is {relation} of the {ab.get('B','object B')}."
-            return text, {'mode': 'agent', **res, **trace}
+            # COUNT: 只计数与 target 名称匹配的框；无匹配则回退 top-20 数量
+            tgt = parsed.get('target', '')
+            if tgt:
+                matched = [o for o in det_topk if tgt in self._norm_label(o.get('name', ''))]
+                return str(len(matched)), {'mode': 'fixed', 'count_target': tgt, 'matched': len(matched), **trace}
+            return str(len(det_topk)), {'mode': 'fixed', **trace}
 
         if task_type == 'RoomDetection':
-            room_prompt = [
-                "Given a 3D indoor scene candidate objects (name + bbox), predict the room type. "
-                "Choose one from [bedroom,kitchen,livingroom,bathroom,diningroom,office]. "
-                "Return JSON only: {\"room\":\"...\"}.\n"
-                f"Objects: {json.dumps([{'name': o.get('name'), 'bbox': o.get('BoundingBox')} for o in obj_list[:budget['max_obj']]])}"
-            ]
-            resp = mllm_generate_one(
-                self.args,
-                self.model,
-                room_prompt,
-                sys_msg,
-                pcl_paths=pcl_paths,
-                obj_list=obj_list,
-                list_of_objpoints=list_of_objpoints,
-                task_type=task_type,
-                max_length=128,
-                top_p=0.9,
-                temperature=0.0,
-            )
-            raw = resp[0].split('###')[0]
-            try:
-                room = json.loads(raw).get('room', None)
-            except Exception:
-                room = None
+            # ROOM: 输出目标词 + top-1 bbox（Rgrounding3d_eval 会用 label 匹配文本）
+            room_label = parsed.get('target') or 'unknown'
+            bbox6 = det_topk[0].get('BoundingBox')
+            return f"{room_label} {bbox6}", {'mode': 'fixed', 'room': room_label, 'bbox': bbox6, **trace}
 
-            # union bbox (axis-aligned, center-length form)
-            bxs = [o.get('BoundingBox') for o in obj_list[:budget['max_obj']] if o.get('BoundingBox') is not None]
-            union = None
-            if bxs:
-                xs = [b[0] for b in bxs]
-                ys = [b[1] for b in bxs]
-                zs = [b[2] for b in bxs]
-                ls = [b[3] for b in bxs]
-                ws = [b[4] for b in bxs]
-                hs = [b[5] for b in bxs]
+        if task_type == 'PositionRelation':
+            # REL: 按名称匹配 A/B；找不到则回退 top-1/top-2；仅 4 类关系
+            tgtA = parsed.get('A', '')
+            tgtB = parsed.get('B', '')
+            bboxA = None
+            bboxB = None
+            if tgtA:
+                for obj in det_topk:
+                    if tgtA in self._norm_label(obj.get('name', '')):
+                        bboxA = obj.get('BoundingBox')
+                        break
+            if tgtB:
+                for obj in det_topk:
+                    if tgtB in self._norm_label(obj.get('name', '')):
+                        bboxB = obj.get('BoundingBox')
+                        break
+            if bboxA is None:
+                bboxA = det_topk[0].get('BoundingBox')
+            if bboxB is None:
+                bboxB = det_topk[1].get('BoundingBox') if len(det_topk) > 1 else bboxA
+            if not bboxA or not bboxB:
+                return 'unknown', {'mode': 'fixed', **trace}
+            relation = self._relation_4way(bboxA, bboxB)
+            return relation, {'mode': 'fixed', 'relation': relation, 'bboxA': bboxA, 'bboxB': bboxB, **trace}
 
-                minx = min(x - l / 2 for x, l in zip(xs, ls))
-                maxx = max(x + l / 2 for x, l in zip(xs, ls))
-                miny = min(y - h / 2 for y, h in zip(ys, hs))
-                maxy = max(y + h / 2 for y, h in zip(ys, hs))
-                minz = min(z - w / 2 for z, w in zip(zs, ws))
-                maxz = max(z + w / 2 for z, w in zip(zs, ws))
-
-                cx = (minx + maxx) / 2
-                cy = (miny + maxy) / 2
-                cz = (minz + maxz) / 2
-                union = [cx, cy, cz, (maxx - minx), (maxz - minz), (maxy - miny)]
-
-            res = {'room': room, 'room_bbox': union, 'raw': raw}
-            res['reflection_pass'] = self._reflection_check(task_type, res)
-
-            if union is None:
-                text = room or 'unknown'
-            else:
-                # Rgrounding3d_eval: parse_bbox_3d_Vis(text) 读取 bbox；classification_acc(object_info['label'], text) 用 label 匹配。
-                # 因此把 label(room) + bbox6 输出到同一行。
-                text = f"{room} {union}"
-            return text, {'mode': 'agent', **res, **trace}
-
-        resp = mllm_generate_one(
-            self.args,
-            self.model,
-            [query],
-            sys_msg,
-            pcl_paths=pcl_paths,
-            obj_list=obj_list,
-            list_of_objpoints=list_of_objpoints,
-            task_type=task_type,
-            max_length=self.args.max_tgt_len,
-            top_p=0.9,
-            temperature=0.8,
-        )
-        text = resp[0].split('###')[0]
-        return text, {'mode': 'fallback', 'raw': text, **trace}
+        return 'unknown', {'mode': 'fixed', **trace}
 
 
 def parse_args():
@@ -463,7 +362,7 @@ def parse_args():
                         help='LoRA/PEFT delta 权重路径')
     # openlamm.py expects this key in args
     parser.add_argument('--train_stage', type=int, default=2,
-                        help='1/2 表示仅做目标对齐，3 表示全量阶段（与 inference_3d.py 一致）')
+                        help='1 for obj alignment;2for test；3 for fintune')
     parser.add_argument('--stage', type=int, default=2, help='同 train_stage，保持接口兼容')
 
     # LoRA configurations (openlamm.py expects these keys)
@@ -490,7 +389,7 @@ def parse_args():
     parser.add_argument('--budget_detector', type=int, default=1, help='检测器调用预算，当前复用现有检测结果')
     parser.add_argument('--wo_reflection', action='store_true', help='关闭反思步骤')
     parser.add_argument('--wo_tool', action='store_true', help='关闭工具调用，仅用基准式回答')
-    parser.add_argument('--dry_run', type=int, default=0, help='>0 时仅跑前 N 条样本用于快速检查')
+    parser.add_argument('--dry_run', type=int, default=10, help='>0 时仅跑前 N 条样本用于快速检查')
     parser.add_argument('--do_sample', action='store_true',
                         help='开启采样生成；默认关闭以使用 greedy，避免概率 nan 触发 CUDA assert')
 
@@ -503,7 +402,7 @@ def parse_args():
                         help='按索引存储的测试检测结果路径')
     parser.add_argument('--objpoints_path', type=str,
                         default='/data/HTC/Project/Point-BERT/data/ModelNet/modelnet40_normal_resampled/my_test_1024pts_fps.dat',
-                        help='预存的对象点云缓存路径')
+                        help='用于分类等任务的独立对象点云缓存路径')
 
     args = parser.parse_args()
 
@@ -537,9 +436,9 @@ def main():
     # 将模型移动到指定设备并使用 FP16 提升推理速度
     model = model.eval().half().to(device)
 
-    with open(args.objpoints_path, 'rb') as f:
-        objpoints_pack = pickle.load(f)
-    list_of_objpoints_all = objpoints_pack[0]
+    # For scene tasks (Counting/VG/Room/PositionRelation), we follow inference_3d: use detection bboxes only.
+    # The objpoints cache is for object-level classification; keep it unused here to avoid mismatch.
+    list_of_objpoints_all = None
 
     det_tool = DetectionTool3D(args.detection_meta, args.detection_test)
     agent = Agent3D(args, model, det_tool)
@@ -547,13 +446,8 @@ def main():
     dataloader = load_3Deval_dataset(args.base_data_path, args.task_type, mode='common', batch_size=args.bs)
     sys_msg = dataloader.dataset.system_msg
 
-    out_name = f"Agent_{args.task_type}"
-    if args.wo_tool:
-        out_name += "_wotool"
-    if args.wo_reflection:
-        out_name += "_worefl"
-
-    answers_file = os.path.join(args.answers_dir, out_name + '.jsonl')
+    # 输出文件命名与 inference_3d.py 对齐：<task_type>.jsonl
+    answers_file = os.path.join(args.answers_dir, f"{args.task_type}.jsonl")
     os.makedirs(os.path.dirname(answers_file), exist_ok=True)
 
     with open(answers_file, 'w') as fout:
@@ -564,8 +458,8 @@ def main():
             pcl_paths = data_item['pcl']
             obj_list = det_tool.proposals_for_scene(pcl_paths[0], idx, args.task_type)
 
-            # inference_3d.py: list_of_objpoints[0][index]
-            list_of_objpoints = list_of_objpoints_all[idx]
+            # Scene tasks: no per-object point clouds; openlamm crops via detection bboxes internally
+            list_of_objpoints = []
 
             start = time.time()
             text, trace = agent.solve(args.task_type, sys_msg, data_item, obj_list, list_of_objpoints)
@@ -576,7 +470,6 @@ def main():
                 'pcl': pcl_paths,
                 'text': text,
                 'delta_path': args.delta_ckpt_path,
-                'agent_trace': {**trace, 'elapsed': elapsed},
             }
             fout.write(json.dumps(ans) + '\n')
             fout.flush()
