@@ -307,9 +307,9 @@ def main(args):
     with open("/data/HTC/Project/Point-BERT/data/ModelNet/modelnet40_normal_resampled/my_test_1024pts_fps.dat", 'rb') as f:
         list_of_objpoints = pickle.load(f)
     list_of_class_name = json.load(open("/data/HTC/Project/Point-BERT/data/ModelNet/modelnet40_normal_resampled/my_test.json"))
-    #删除只有一个点的物体
-    list_of_objpoints[0] = [npy for index, npy in enumerate(list_of_objpoints[0])]
-    list_of_objpoints[1] = [npy for index,npy in enumerate(list_of_objpoints[1])]
+    # #删除只有一个点的物体
+    # list_of_objpoints[0] = [npy for index, npy in enumerate(list_of_objpoints[0])]
+    # list_of_objpoints[1] = [npy for index,npy in enumerate(list_of_objpoints[1])]
 
     if task_name in ['Classification','DescriptionObj','ConversationObj']:
         args.max_obj = 12

@@ -1,5 +1,5 @@
 dataset=VOC2012
-exp=classfication_demo
+exp=base_vicuna
 base_data_path=../data/2D_Benchmark
 token_num=256
 layer=-2

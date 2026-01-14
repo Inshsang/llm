@@ -1058,13 +1058,21 @@ class LAMMPEFTModel(nn.Module):
         stopping_criteria = StoppingCriteriaList(
             [LAMMStoppingCriteria([[2277, 29937], [835]], input_embeds)]
         )
+        # Respect caller choice; default to sampling to preserve legacy behavior.
+        do_sample = inputs.get("do_sample", True)
+        top_p = inputs.get("top_p", 1.0)
+        temperature = inputs.get("temperature", 1.0)
+        # Clamp to safe ranges to avoid transformer warpers throwing.
+        top_p = min(max(top_p, 1e-5), 1.0)
+        temperature = max(temperature, 1e-5)
+
         outputs = self.llama_model.generate(
             inputs_embeds=input_embeds,
             attention_mask=input_masks,
             max_new_tokens=inputs["max_tgt_len"],
-            top_p=inputs["top_p"],
-            temperature=inputs["temperature"],
-            do_sample=True,
+            top_p=top_p,
+            temperature=temperature,
+            do_sample=do_sample,
             use_cache=True,
             stopping_criteria=stopping_criteria,
         )
