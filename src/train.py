@@ -10,7 +10,7 @@ def parser_args():
         "--cfg", type=str, default="/data/HTC/Project/llm/src/config/train_ds3.yaml", help="config file"
     )
     parser.add_argument(
-        "--train_stage", type=int, default=2, help="1 for obj alignment;2for test；3 for fintune"
+        "--train_stage", type=int, default=3, help="1 for obj alignment;2for test；3 for fintune"
     )
     # data-related configurations
     parser.add_argument(
@@ -18,7 +18,7 @@ def parser_args():
         type=str,
         # default='/media/kou/Data1/htc/LAMM/data/LAMM_3dinstruct_10k.json',
         # default='/media/kou/Data1/htc/MYDATA/BenchMark/Task/Task_Reconstruct/WholeTrain/LLM_train_all.json',
-        default='/data/HTC/Data/dataset/Benchmark/Task/Task_Reconstruct/WholeTrain/Classification3d.json',
+        default='/data/HTC/Data/dataset/Benchmark/Task/Task_Reconstruct/WholeTrain/temp.json',
         # default='/media/kou/Data1/htc/MYDATA/BenchMark/Task/Task_Reconstruct/Train/Classification.json',
         # default='/media/kou/Data1/htc/MYDATA/BenchMark/Task/Task_Reconstruct/Train/ClassificationLong.json',
         # required=True,

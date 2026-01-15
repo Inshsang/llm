@@ -376,6 +376,10 @@ class LAMMDataset(Dataset):
         elif self.task_type_list[i] in ['Detection3d']:
             points_path = self.scene_gt[self.vision_path_list[i][37:-4]]['Multi_class']
             label_path = self.scene_gt[self.vision_path_list[i][37:-4]]['classes']
+        elif self.task_type_list[i] in ['Agent3d']:
+            points_path = self.scene_gt[self.vision_path_list[i][29:-4]]['boxes']
+            label_path = self.scene_gt[self.vision_path_list[i][29:-4]]['classes']
+            self.vision_path_list[i] = self.vision_path_list[i][:23] + 'Benchmark/data/scene/' + self.vision_path_list[i][29:-4] + '.ply'
         else:
             points_path = self.scene_gt[self.vision_path_list[i][37:-4]]['boxes']
             label_path = self.scene_gt[self.vision_path_list[i][37:-4]]['classes']

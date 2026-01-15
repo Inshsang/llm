@@ -1,31 +1,24 @@
-"""src/agent_inference.py
+"""
+src/agent_inference.py
 
-3D Agent 推理脚本（对齐你的 `src/inference_3d.py` 数据流）。
+3D Agent 推理脚本（对齐 `src/inference_3d.py` 数据流）。
 
-目标：把表格里 Agent 缺失的 3D 任务补齐（VG fine/plus、Counting、RoomDetection、PositionRelation），并且严格符合
-“MLLM 作为 controller + 工具执行 + 已知 label space + 一次反思 + 固定预算”。
+目标：补齐 Agent 缺失的 3D 任务（VG fine/plus、Counting、RoomDetection、PositionRelation），并且体现
+“把 MLLM 扩展成 Agent”：MLLM（多模态）作为 controller，基于点云 + proposals 产生结构化工具调用与关注对象选择。
 
-这里的“工具”不再额外引入外部 detector，而是**直接复用 inference_3d.py 里提到的检测产物**：
+约束：
+- 固定预算：每样本最多 2 次工具（Tool1=DETECT，Tool2=COUNT/BBOX_UNION；REL/VG 通常只 Tool1）
+- 一次反思：只做验收与回退，不做额外推理
+- 不引入外部 detector：复用 Detection.json 的 proposals
 
-- `/data/HTC/Data/dataset/Benchmark/data/metadata/Detection.json` （scene-> object list）
-- `/data/HTC/Data/dataset/Benchmark/Task/Task_Reconstruct/Test/Detection.json`（按 index 的检测结果列表）
-
-并复用 inference_3d.py 中的 obj_list / list_of_objpoints 的组装方式，把候选框（3D bbox）作为“proposal set”，
-让 MLLM 做重排序/解析，必要时用几何工具计算关系/计数。
-
-输出：jsonl，每条包含 id/pcl/text（兼容原 eval 读法）+ 额外的 agent_trace 字段（工具调用、反思等）。
-
-注意：RoomDetection 在 repo 的 system message 更像输出 room polygon vertices；你表里用 mAP@0.5。
-本脚本先实现一个最小可跑的 Agent 版本（给出 room type + 一个 union bbox 近似）。如果你现有 3D room eval
-脚本要求 polygon/多实例格式，我可以再把输出对齐到它的 parser。
+输出：jsonl，每条包含 id/pcl/text（兼容 eval）+ agent_trace（可用于论文展示 agent 过程）。
 """
 
 import os
 import json
 import time
 import argparse
-import pickle
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 from tqdm import tqdm
@@ -36,6 +29,9 @@ from conversations import conv_templates
 from datasets import load_3Deval_dataset
 
 
+# -------------------------
+# Prompt helpers
+# -------------------------
 def generate_conversation_text(args, input_list, history, sys_msg=None):
     conv = conv_templates[args.conv_mode]
     if sys_msg:
@@ -57,10 +53,12 @@ def _greedy_generate(model, inputs):
     stopping_criteria = StoppingCriteriaList([
         LAMMStoppingCriteria([[2277, 29937], [835]], input_embeds)
     ])
+
     top_p = inputs.get('top_p', 1.0)
     temperature = inputs.get('temperature', 1.0)
     top_p = min(max(top_p, 1e-5), 1.0)
     temperature = max(temperature, 1e-5)
+
     outputs = model.llama_model.generate(
         inputs_embeds=input_embeds,
         attention_mask=input_masks,
@@ -74,13 +72,14 @@ def _greedy_generate(model, inputs):
     return model.llama_tokenizer.batch_decode(outputs, skip_special_tokens=True)
 
 
-def _greedy_text_generate(model: LAMMPEFTModel, prompt: str, max_new_tokens: int = 128) -> str:
-    """纯文本 greedy 生成（用于解析问题）。避免走多模态 embedding，规避形状不匹配。"""
+def _greedy_text_generate(model: LAMMPEFTModel, prompt: str, device: torch.device, max_new_tokens: int = 200) -> str:
+    """纯文本 greedy 生成（用于 intent 规划，稳定）。"""
     tok = model.llama_tokenizer(
         prompt,
         return_tensors="pt",
         add_special_tokens=True,
-    ).to(model.device)
+    ).to(device)
+
     out = model.llama_model.generate(
         input_ids=tok.input_ids,
         attention_mask=tok.attention_mask,
@@ -88,9 +87,7 @@ def _greedy_text_generate(model: LAMMPEFTModel, prompt: str, max_new_tokens: int
         do_sample=False,
         use_cache=True,
     )
-    # only decode newly generated part (optional); simplest is full decode
-    text = model.llama_tokenizer.decode(out[0], skip_special_tokens=True)
-    return text
+    return model.llama_tokenizer.decode(out[0], skip_special_tokens=True)
 
 
 def mllm_generate_one(
@@ -106,19 +103,12 @@ def mllm_generate_one(
     top_p,
     temperature,
 ):
-    # transformers 的 TemperatureLogitsWarper 要求 temperature>0，避免传入 0 触发异常
+    """多模态 MLLM 生成：让模型真正看到 pcl + proposals（obj_list）"""
     safe_temperature = max(temperature, 1e-5)
     safe_top_p = min(max(top_p, 1e-5), 1.0)
-    prompt_text = generate_conversation_text(args, prompt_list, history=[], sys_msg=sys_msg)
-
-    # Ensure that the input data is valid and does not contain NaN values
-    assert not any(isinstance(p, torch.Tensor) and torch.isnan(p).any() for p in prompt_list), "Prompt list contains NaN values in tensors"
-
-    # Add additional logging for debugging
-    print(f"Generating with task_type: {task_type}, max_length: {max_length}, top_p: {top_p}, temperature: {temperature}")
-
-    # Align with inference_3d: let the model extract vision features from pcl + objpoints
-    modality_embeds = []
+    # IMPORTANT: openlamm.prepare_generation_embedding will add the role markers and <Pcl> tags.
+    # So here we must pass RAW prompt strings (no "### Human:" etc), otherwise prompts will be duplicated.
+    prompt_text = prompt_list
 
     inputs = {
         'prompt': prompt_text,
@@ -127,19 +117,23 @@ def mllm_generate_one(
         'temperature': safe_temperature,
         'max_tgt_len': max_length,
         'do_sample': args.do_sample,
-        'modality_embeds': modality_embeds,
+        'modality_embeds': [],
         'obj_list': obj_list,
         'list_of_objpoints': list_of_objpoints[:args.max_obj],
-        'task_type': task_type,
+        # Agent3d training is configured to run without system prompt.
+        'task_type': 'Agent3d',
+        'use_system': False,
     }
 
-    # 如果用户未开启 --do_sample，则强制走 greedy 路径，避免 openlamm 内部写死的采样导致 multinomial 报错。
     if not args.do_sample:
         return _greedy_generate(model, inputs)
 
     return model.generate(inputs)
 
 
+# -------------------------
+# Tools (reuse detections)
+# -------------------------
 class DetectionTool3D:
     """复用 Detection 产物作为 proposal generator。"""
 
@@ -155,16 +149,19 @@ class DetectionTool3D:
         if self._test is None:
             self._test = json.load(open(self.test_detection_path, 'r'))
 
-    def proposals_for_scene(self, pcl_path: str, index: int, task_type: str) -> List[Dict[str, Any]]:
-        """返回候选 objects list，每个元素至少包含 name/BoundingBox。
-
-        对齐 inference_3d.py：
-        - task_type==Detection: 用 Test/Detection.json 的 per-index 'object'
-        - else: 用 metadata/Detection.json 里的 scene_id key
+    def proposals_for_scene(self, pcl_path: str, index: int) -> List[Dict[str, Any]]:
+        """
+        更稳的对齐：优先使用 test_detection 的 per-index object（通常与 eval 对齐）。
+        若不可用，再回退到 metadata(scene_id->objects)。
         """
         self._lazy_load()
-        if task_type == 'Detection':
-            return self._test[index]['object']
+
+        try:
+            item = self._test[index]
+            if isinstance(item, dict) and 'object' in item:
+                return item['object']
+        except Exception:
+            pass
 
         base = os.path.basename(pcl_path)
         src_id = os.path.splitext(base)[0]
@@ -174,235 +171,543 @@ class DetectionTool3D:
 
 
 class GeomTool3D:
-    """几何工具：用于 PositionRelation 的关系计算（bbox center）。"""
+    """几何工具：关系计算 + bbox union"""
 
     @staticmethod
-    def _center(bbox6):
-        # bbox: [cx, cy, cz, l, w, h]
-        return bbox6[0], bbox6[1], bbox6[2]
-
-    def relation(self, bboxA, bboxB):
-        ax, ay, az = self._center(bboxA)
-        bx, by, bz = self._center(bboxB)
-        dx, dy, dz = bx - ax, by - ay, bz - az
-
-        if abs(dy) > max(abs(dx), abs(dz)):
-            return 'above' if dy > 0 else 'below'
-        if abs(dx) >= abs(dz):
-            return 'right' if dx > 0 else 'left'
-        return 'front' if dz > 0 else 'behind'
-
-
-class Agent3D:
-    def __init__(self, args, model, det_tool: DetectionTool3D, geom: Optional[GeomTool3D] = None):
-        self.args = args
-        self.model = model
-        self.det_tool = det_tool
-        self.geom = geom or GeomTool3D()
+    def _is_minmax(b: List[float]) -> bool:
+        return len(b) == 6 and (b[0] <= b[3]) and (b[1] <= b[4]) and (b[2] <= b[5])
 
     @staticmethod
-    def _norm_label(label: str) -> str:
-        return ''.join(ch for ch in (label or '').lower() if ch.isalnum())
-
-    def _parse_question_minimal(self, sys_msg: str, query: str) -> Dict[str, Any]:
-        """Step1：纯文本解析，只判定任务类型与目标词，不做 bbox 或打分。"""
-        inst = (
-            "You are a parser. Do NOT solve the task.\n"
-            "Given a question, output JSON only with keys:\n"
-            "- task: one of [VG, COUNT, ROOM, REL]\n"
-            "- target: a single lowercase word for VG/COUNT/ROOM (empty for REL)\n"
-            "- A, B: lowercase words for REL (empty otherwise)\n"
-            "Return example: {\"task\":\"COUNT\",\"target\":\"chair\",\"A\":\"\",\"B\":\"\"}\n"
-            f"Question: {query}\n"
-        )
-
-        # keep same conversation style header if provided
-        prompt = inst if not sys_msg else (sys_msg + "\n" + inst)
-        text = _greedy_text_generate(self.model, prompt, max_new_tokens=128)
-
-        # try extract the last JSON object in the output
-        start = text.rfind('{')
-        end = text.rfind('}')
-        parsed: Dict[str, Any] = {'task': '', 'target': '', 'A': '', 'B': '', 'raw': text}
-        if start != -1 and end != -1 and end > start:
-            try:
-                parsed.update(json.loads(text[start:end + 1]))
-            except Exception:
-                pass
-
-        task = (parsed.get('task') or '').strip().upper()
-        if task not in {'VG', 'COUNT', 'ROOM', 'REL'}:
-            task = ''
-        parsed['task'] = task
-        parsed['target'] = self._norm_label(parsed.get('target', ''))
-        parsed['A'] = self._norm_label(parsed.get('A', ''))
-        parsed['B'] = self._norm_label(parsed.get('B', ''))
-        return parsed
+    def _center(b: List[float]) -> Tuple[float, float, float]:
+        if GeomTool3D._is_minmax(b):
+            return (b[0] + b[3]) / 2.0, (b[1] + b[4]) / 2.0, (b[2] + b[5]) / 2.0
+        return b[0], b[1], b[2]  # assume [cx,cy,cz,l,w,h]
 
     @staticmethod
-    def _bbox_to_minmax(bbox):
-        cx, cy, cz, l, w, h = bbox
-        return (
-            cx - l / 2,
-            cy - h / 2,
-            cz - w / 2,
-            cx + l / 2,
-            cy + h / 2,
-            cz + w / 2,
-        )
+    def _to_minmax(b: List[float]) -> List[float]:
+        if GeomTool3D._is_minmax(b):
+            return b
+        cx, cy, cz, l, w, h = b
+        return [cx - l / 2, cy - h / 2, cz - w / 2, cx + l / 2, cy + h / 2, cz + w / 2]
 
-    def _relation_4way(self, bboxA, bboxB) -> str:
-        """REL: 仅输出 left/right/above/below 四类（按中心点）。"""
-        ax, ay, _ = bboxA[0], bboxA[1], bboxA[2]
-        bx, by, _ = bboxB[0], bboxB[1], bboxB[2]
-        dx, dy = (bx - ax), (by - ay)
+    @staticmethod
+    def _from_minmax(mm: List[float], out_format: str) -> List[float]:
+        xmin, ymin, zmin, xmax, ymax, zmax = mm
+        if out_format == "minmax":
+            return [xmin, ymin, zmin, xmax, ymax, zmax]
+        cx = (xmin + xmax) / 2.0
+        cy = (ymin + ymax) / 2.0
+        cz = (zmin + zmax) / 2.0
+        l = (xmax - xmin)
+        h = (ymax - ymin)
+        w = (zmax - zmin)
+        return [cx, cy, cz, l, w, h]
+
+    def relation_4way(self, bboxA: List[float], bboxB: List[float]) -> str:
+        ax, ay, _ = self._center(bboxA)
+        bx, by, _ = self._center(bboxB)
+        dx, dy = bx - ax, by - ay
         if abs(dx) >= abs(dy):
             return 'right' if dx > 0 else 'left'
         return 'above' if dy > 0 else 'below'
 
-    def solve(self, task_type: str, sys_msg: str, data_item: Dict[str, Any], obj_list: List[Dict[str, Any]], list_of_objpoints):
-        query = data_item['query'][0] if isinstance(data_item['query'], list) else data_item['query']
-        pcl_paths = data_item['pcl']
-        # Step1) 纯文本解析（不依赖视觉）
-        parsed = self._parse_question_minimal(sys_msg, query)
+    def union_bbox(self, bboxes: List[List[float]]) -> Optional[List[float]]:
+        if not bboxes:
+            return None
+        out_format = "minmax" if self._is_minmax(bboxes[0]) else "center"
 
-        # Step2) 一次检测调用：保留 detector 顺序，截断前 20
-        det_topk = obj_list[:20]
+        mins = [float("inf"), float("inf"), float("inf")]
+        maxs = [float("-inf"), float("-inf"), float("-inf")]
 
-        # Step3) 固定规则：直接用检测结果出答案
-        trace = {
-            'query': query,
-            'task_type_arg': task_type,
-            'parsed': parsed,
-            'det_topk_n': len(det_topk),
+        for b in bboxes:
+            mm = self._to_minmax(b)
+            mins[0] = min(mins[0], mm[0])
+            mins[1] = min(mins[1], mm[1])
+            mins[2] = min(mins[2], mm[2])
+            maxs[0] = max(maxs[0], mm[3])
+            maxs[1] = max(maxs[1], mm[4])
+            maxs[2] = max(maxs[2], mm[5])
+
+        return self._from_minmax([mins[0], mins[1], mins[2], maxs[0], maxs[1], maxs[2]], out_format)
+
+
+# -------------------------
+# Agent: MLLM->Agent wrapper
+# -------------------------
+class Agent3D:
+    """
+    两阶段 MLLM-controller：
+    - Intent（规划）：输出 1/2 步工具调用 JSON + 关注对象关键词
+    - Review（多模态决策）：读 DETECT 的 proposals（并让 MLLM 看到点云/物体 crop），输出选择的对象索引，
+      决定是否执行 tool2（COUNT/BBOX_UNION），并给 summary（写论文用）
+    """
+
+    # 小闭集（写论文“已知 label space”用）
+    REL_SPACE = ["left", "right", "above", "below"]
+    ROOM_SPACE = ["bedroom", "kitchen", "livingroom", "bathroom", "diningroom", "office", "other"]
+
+    # 给 Room 的最小先验（用于 MLLM 没选出来时回退）
+    ROOM_HINTS = {
+        "bedroom": ["bed", "door", "wardrobe", "nightstand"],
+        "kitchen": ["fridge", "stove", "sink", "cabinet"],
+        "livingroom": ["sofa", "tv", "door", "coffeetable"],
+        "bathroom": ["toilet", "sink", "door", "shower"],
+        "diningroom": ["table", "chair", "cabinet"],
+        "office": ["desk", "chair", "door", "bookshelf"],
+    }
+
+    def __init__(self, args, model: LAMMPEFTModel, det_tool: DetectionTool3D, device: torch.device,
+                 geom: Optional[GeomTool3D] = None):
+        self.args = args
+        self.model = model
+        self.det_tool = det_tool
+        self.device = device
+        self.geom = geom or GeomTool3D()
+
+    @staticmethod
+    def _norm(s: str) -> str:
+        return ''.join(ch for ch in (s or '').lower() if ch.isalnum())
+
+    @staticmethod
+    def _extract_last_json(text: str) -> Dict[str, Any]:
+        # 取最后一个可解析的 {...}
+        candidates = []
+        stack = []
+        start = None
+        for i, ch in enumerate(text):
+            if ch == '{':
+                if not stack:
+                    start = i
+                stack.append('{')
+            elif ch == '}':
+                if stack:
+                    stack.pop()
+                    if not stack and start is not None:
+                        candidates.append(text[start:i+1])
+                        start = None
+        for s in reversed(candidates):
+            try:
+                return json.loads(s)
+            except Exception:
+                continue
+        return {}
+
+    @staticmethod
+    def _safe_int_list(x) -> List[int]:
+        if not isinstance(x, list):
+            return []
+        out = []
+        for v in x:
+            try:
+                out.append(int(v))
+            except Exception:
+                continue
+        return out
+
+    def _format_candidates_brief(self, det_topk: List[Dict[str, Any]]) -> str:
+        # 给 MLLM 一个“索引->name”的轻文本锚点（真正识别可用多模态）
+        lines = []
+        for i, o in enumerate(det_topk[:self.args.max_obj]):
+            name = o.get("name", "") or o.get("label", "") or ""
+            bbox = o.get("BoundingBox", None)
+            lines.append(f"{i}: name={name}, bbox={bbox}")
+        return "\n".join(lines)
+
+    def _find_by_keywords_fallback(self, det_topk: List[Dict[str, Any]], keywords: List[str]) -> List[int]:
+        kws = [self._norm(k) for k in (keywords or []) if k]
+        if not kws:
+            return []
+        hits = []
+        for i, o in enumerate(det_topk):
+            n = self._norm(o.get("name", "") or o.get("label", "") or "")
+            for k in kws:
+                if k and k in n:
+                    hits.append(i)
+                    break
+        return hits
+
+    # ----------- Stage 1: intent/plan (text is OK, but still using same MLLM core) -----------
+    def mllm_intent(self, task_type: str, query: str) -> Dict[str, Any]:
+        """
+        输出 tool_plan（1/2步）+ focus（target/A/B/room_type/keywords）
+        注意：这里用纯文本 greedy，主要为了 JSON 稳定；论文重点在 Stage2 多模态选择。
+        """
+        must_plan = {
+            "Counting": "DETECT then COUNT",
+            "RoomDetection": "DETECT then BBOX_UNION",
+            "PositionRelation": "DETECT only",
+            "VisualGrounding_plus": "DETECT only",
+        }[task_type]
+
+        controller_sys = (
+            "You are a multimodal MLLM-controller that plans tool calls.\n"
+            "Do NOT answer the task. Only output ONE JSON.\n"
+            "Allowed tools: DETECT, COUNT, BBOX_UNION.\n"
+            f"Relation label space: {self.REL_SPACE}\n"
+            f"Room label space: {self.ROOM_SPACE}\n"
+        )
+        inst = (
+            f"TaskType={task_type}\n"
+            f"Your plan MUST be: {must_plan}\n"
+            "Output JSON schema:\n"
+            "{\n"
+            "  \"stage\":\"intent\",\n"
+            "  \"task\":\"VisualGrounding_plus|Counting|RoomDetection|PositionRelation\",\n"
+            "  \"focus\":{\n"
+            "     \"target\":\"\", \"A\":\"\", \"B\":\"\", \"room_type\":\"\", \"focus_keywords\":[]\n"
+            "  },\n"
+            "  \"tool_plan\":[{\"tool\":\"DETECT\",\"args\":{\"topk\":20}}]\n"
+            "}\n"
+            "Rules:\n"
+            "- Counting: fill focus.target; tool_plan=[DETECT, COUNT]\n"
+            "- VisualGrounding_plus: fill focus.target; tool_plan=[DETECT]\n"
+            "- PositionRelation: fill focus.A, focus.B; tool_plan=[DETECT]\n"
+            "- RoomDetection: fill focus.room_type and focus_keywords (e.g., bedroom->['bed','door']); tool_plan=[DETECT, BBOX_UNION]\n"
+            f"Question: {query}\n"
+        )
+
+        raw = _greedy_text_generate(self.model, controller_sys + "\n" + inst, device=self.device, max_new_tokens=220)
+        js = self._extract_last_json(raw)
+
+        # sanitize + enforce plan
+        focus = (js.get("focus", {}) if isinstance(js, dict) else {}) if isinstance(js, dict) else {}
+        out = {
+            "stage": "intent",
+            "task": task_type,
+            "focus": {
+                "target": self._norm(focus.get("target", "")),
+                "A": self._norm(focus.get("A", "")),
+                "B": self._norm(focus.get("B", "")),
+                "room_type": self._norm(focus.get("room_type", "")),
+                "focus_keywords": [self._norm(x) for x in (focus.get("focus_keywords", []) or []) if isinstance(x, str)],
+            },
+            "tool_plan": [{"tool": "DETECT", "args": {"topk": int(self.args.max_obj)}}],
+            "raw": raw,
         }
 
+        if task_type == "Counting":
+            out["tool_plan"] = [
+                {"tool": "DETECT", "args": {"topk": int(self.args.max_obj)}},
+                {"tool": "COUNT", "args": {}},
+            ]
+        elif task_type == "RoomDetection":
+            out["tool_plan"] = [
+                {"tool": "DETECT", "args": {"topk": int(self.args.max_obj)}},
+                {"tool": "BBOX_UNION", "args": {}},
+            ]
+        else:
+            out["tool_plan"] = [{"tool": "DETECT", "args": {"topk": int(self.args.max_obj)}}]
+
+        return out
+
+    # ----------- Stage 2: review/select (MUST use multimodal MLLM) -----------
+    def mllm_review_multimodal(self, task_type: str, query: str, pcl_paths, det_topk: List[Dict[str, Any]],
+                               intent: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        让 MLLM 真正看到 point cloud + obj proposals（obj_list 顺序对齐 det_topk），输出：
+        - summary
+        - need_tool2（Count/Room 必须 true；VG/REL 默认 false）
+        - selected_object_indices（VG:1个；REL:2个；Room:2~8个；Count:任意个）
+        """
+        controller_sys = (
+            "You are a multimodal MLLM-controller.\n"
+            "You can see the 3D point cloud and each object proposal (in the same order as the index list).\n"
+            "Object 'name' may be noisy; use geometry/shape from the 3D observation when needed.\n"
+            "Only output ONE JSON object. No extra text.\n"
+        )
+
+        # 给一点“索引锚点”，但强调名字不可靠
+        cand_text = self._format_candidates_brief(det_topk)
+
+        # 强约束输出 JSON，避免跑偏
+        rules = (
+            "Schema:\n"
+            "{\n"
+            "  \"stage\":\"review\",\n"
+            "  \"summary\":\"one short sentence\",\n"
+            "  \"need_tool2\": true/false,\n"
+            "  \"selected_object_indices\": [int, ...]\n"
+            "}\n"
+            "Rules by task:\n"
+            "- VisualGrounding_plus: select EXACTLY 1 index.\n"
+            "- PositionRelation: select EXACTLY 2 indices: [A_index, B_index].\n"
+            "- Counting: select all indices that are the target; need_tool2 must be true.\n"
+            "- RoomDetection: select 2~8 indices that define the room extent (e.g., bedroom: bed+door); need_tool2 must be true.\n"
+        )
+
+        focus = intent.get("focus", {})
+        prompt = (
+            f"{rules}\n"
+            f"TaskType={task_type}\n"
+            f"Focus={json.dumps(focus, ensure_ascii=False)}\n"
+            f"Question={query}\n"
+            "Index list (for reference, names may be noisy):\n"
+            f"{cand_text}\n"
+        )
+
+        # 关键：这里调用多模态生成，传入 pcl_paths + obj_list=det_topk
+        out = mllm_generate_one(
+            self.args,
+            self.model,
+            prompt_list=[prompt],
+            sys_msg=controller_sys,            # 用 controller system，不用 dataset sys_msg，保证 JSON 行为一致
+            pcl_paths=pcl_paths,
+            obj_list=det_topk,
+            list_of_objpoints=[],              # scene tasks 默认空即可（与 inference_3d 一致）
+            task_type=task_type,
+            max_length=280,
+            top_p=1.0,
+            temperature=1e-5,
+        )
+        raw = out[0] if isinstance(out, list) and out else str(out)
+        js = self._extract_last_json(raw)
+
+        review = {
+            "stage": "review",
+            "summary": "",
+            "need_tool2": task_type in {"Counting", "RoomDetection"},
+            "selected_object_indices": [],
+            "raw": raw,
+        }
+        if isinstance(js, dict):
+            if isinstance(js.get("summary", ""), str):
+                review["summary"] = js.get("summary", "")
+            if isinstance(js.get("need_tool2", None), bool):
+                review["need_tool2"] = js["need_tool2"]
+            review["selected_object_indices"] = self._safe_int_list(js.get("selected_object_indices", []))
+
+        # 固定预算：Count/Room 必须 tool2；VG/REL 不执行 tool2
+        if task_type in {"Counting", "RoomDetection"}:
+            review["need_tool2"] = True
+        else:
+            review["need_tool2"] = False
+
+        # clamp indices
+        k = len(det_topk)
+        review["selected_object_indices"] = [i for i in review["selected_object_indices"] if 0 <= i < k]
+
+        return review
+
+    # ----------- one-shot reflection (validation + fallback) -----------
+    def reflection_fix(self, task_type: str, intent: Dict[str, Any], det_topk: List[Dict[str, Any]],
+                       selected: List[int], text: str) -> Tuple[str, Dict[str, Any]]:
+        trace = {"applied": False, "reason": ""}
+
+        if self.args.wo_reflection:
+            return text, trace
+
+        if task_type == "Counting":
+            try:
+                int(text.strip())
+                return text, trace
+            except Exception:
+                trace["applied"] = True
+                trace["reason"] = "count_not_int_fallback_0"
+                return "0", trace
+
+        if task_type == "PositionRelation":
+            if text.strip() in set(self.REL_SPACE):
+                return text, trace
+            trace["applied"] = True
+            trace["reason"] = "invalid_relation_fallback_left"
+            return "left", trace
+
+        if task_type in {"VisualGrounding_plus", "RoomDetection"}:
+            if "[" in text and "]" in text:
+                return text, trace
+            # fallback: use top-1 bbox
+            if det_topk and det_topk[0].get("BoundingBox") is not None:
+                bb = det_topk[0]["BoundingBox"]
+                trace["applied"] = True
+                trace["reason"] = "bbox_missing_fallback_top1"
+                if task_type == "RoomDetection":
+                    room_label = intent.get("focus", {}).get("room_type", "") or "unknown"
+                    return f"{room_label} {bb}", trace
+                return str(bb), trace
+
+        return text, trace
+
+    # ----------- main solve loop -----------
+    def solve(self, task_type: str, data_item: Dict[str, Any], obj_list: List[Dict[str, Any]]) -> Tuple[str, Dict[str, Any]]:
+        query = data_item['query'][0] if isinstance(data_item['query'], list) else data_item['query']
+        pcl_paths = data_item['pcl']
+
+        agent_trace: Dict[str, Any] = {
+            "task_type": task_type,
+            "query": query,
+            "budget": {"max_tool_calls": 2, "used": 0},
+        }
+
+        # Ablation: w/o tool => direct answer (baseline)
+        if self.args.wo_tool:
+            direct = mllm_generate_one(
+                self.args, self.model,
+                prompt_list=[query],
+                sys_msg="You are a helpful multimodal assistant.",
+                pcl_paths=pcl_paths,
+                obj_list=obj_list[:self.args.max_obj],
+                list_of_objpoints=[],
+                task_type=task_type,
+                max_length=min(self.args.max_tgt_len, 256),
+                top_p=1.0,
+                temperature=1e-5,
+            )
+            text = direct[0] if isinstance(direct, list) and direct else str(direct)
+            agent_trace["mode"] = "wo_tool_direct"
+            return text, agent_trace
+
+        # Step1: intent (plan tool calls)
+        intent = self.mllm_intent(task_type, query)
+        agent_trace["intent"] = intent
+
+        # Tool1: DETECT (reuse)
+        det_topk = (obj_list or [])[:int(self.args.max_obj)]
+        agent_trace["budget"]["used"] += 1
+        agent_trace["tool1"] = {"tool": "DETECT", "n": len(det_topk), "topk": int(self.args.max_obj)}
+
         if not det_topk:
-            if task_type == 'Counting':
-                return '0', {'mode': 'fixed', **trace}
-            return 'unknown', {'mode': 'fixed', **trace}
+            # hard fallback
+            if task_type == "Counting":
+                return "0", {**agent_trace, "mode": "empty_detect"}
+            return "unknown", {**agent_trace, "mode": "empty_detect"}
 
-        if task_type in ['VisualGrounding_plus', 'VisualGrounding']:
-            # 优先取与 target 名称匹配的第一个，否则回退 top-1
-            tgt = parsed.get('target', '')
-            chosen = None
-            if tgt:
-                for obj in det_topk:
-                    if tgt in self._norm_label(obj.get('name', '')):
-                        chosen = obj
-                        break
-            if chosen is None:
-                chosen = det_topk[0]
-            bbox6 = chosen.get('BoundingBox')
-            return str(bbox6), {'mode': 'fixed', 'bbox': bbox6, **trace}
+        # Step2: review/select (MULTIMODAL MLLM)
+        review = self.mllm_review_multimodal(task_type, query, pcl_paths, det_topk, intent)
+        agent_trace["review"] = review
+        selected = review.get("selected_object_indices", [])
 
-        if task_type == 'Counting':
-            # COUNT: 只计数与 target 名称匹配的框；无匹配则回退 top-20 数量
-            tgt = parsed.get('target', '')
-            if tgt:
-                matched = [o for o in det_topk if tgt in self._norm_label(o.get('name', ''))]
-                return str(len(matched)), {'mode': 'fixed', 'count_target': tgt, 'matched': len(matched), **trace}
-            return str(len(det_topk)), {'mode': 'fixed', **trace}
+        # Tool2 decision (fixed budget)
+        text = "unknown"
 
-        if task_type == 'RoomDetection':
-            # ROOM: 输出目标词 + top-1 bbox（Rgrounding3d_eval 会用 label 匹配文本）
-            room_label = parsed.get('target') or 'unknown'
-            bbox6 = det_topk[0].get('BoundingBox')
-            return f"{room_label} {bbox6}", {'mode': 'fixed', 'room': room_label, 'bbox': bbox6, **trace}
+        if task_type == "VisualGrounding_plus":
+            if len(selected) != 1:
+                tgt = intent.get("focus", {}).get("target", "")
+                hits = self._find_by_keywords_fallback(det_topk, [tgt] if tgt else [])
+                selected = [hits[0]] if hits else [0]
+                agent_trace["fallback_select"] = {"reason": "vg_fix", "selected": selected}
+            bb = det_topk[selected[0]].get("BoundingBox")
+            text = str(bb)
 
-        if task_type == 'PositionRelation':
-            # REL: 按名称匹配 A/B；找不到则回退 top-1/top-2；仅 4 类关系
-            tgtA = parsed.get('A', '')
-            tgtB = parsed.get('B', '')
-            bboxA = None
-            bboxB = None
-            if tgtA:
-                for obj in det_topk:
-                    if tgtA in self._norm_label(obj.get('name', '')):
-                        bboxA = obj.get('BoundingBox')
-                        break
-            if tgtB:
-                for obj in det_topk:
-                    if tgtB in self._norm_label(obj.get('name', '')):
-                        bboxB = obj.get('BoundingBox')
-                        break
-            if bboxA is None:
-                bboxA = det_topk[0].get('BoundingBox')
-            if bboxB is None:
-                bboxB = det_topk[1].get('BoundingBox') if len(det_topk) > 1 else bboxA
-            if not bboxA or not bboxB:
-                return 'unknown', {'mode': 'fixed', **trace}
-            relation = self._relation_4way(bboxA, bboxB)
-            return relation, {'mode': 'fixed', 'relation': relation, 'bboxA': bboxA, 'bboxB': bboxB, **trace}
+        elif task_type == "PositionRelation":
+            if len(selected) != 2:
+                A = intent.get("focus", {}).get("A", "")
+                B = intent.get("focus", {}).get("B", "")
+                a_hits = self._find_by_keywords_fallback(det_topk, [A] if A else [])
+                b_hits = self._find_by_keywords_fallback(det_topk, [B] if B else [])
+                a_idx = a_hits[0] if a_hits else 0
+                b_idx = b_hits[0] if b_hits else (1 if len(det_topk) > 1 else 0)
+                selected = [a_idx, b_idx]
+                agent_trace["fallback_select"] = {"reason": "rel_fix", "selected": selected, "A": A, "B": B}
+            bbA = det_topk[selected[0]].get("BoundingBox")
+            bbB = det_topk[selected[1]].get("BoundingBox")
+            if isinstance(bbA, list) and len(bbA) == 6 and isinstance(bbB, list) and len(bbB) == 6:
+                text = self.geom.relation_4way(bbA, bbB)
+            else:
+                text = "unknown"
 
-        return 'unknown', {'mode': 'fixed', **trace}
+        elif task_type == "Counting":
+            # must do tool2 COUNT
+            agent_trace["budget"]["used"] += 1
+            agent_trace["tool2"] = {"tool": "COUNT"}
+            # 如果 MLLM 没选出来，回退到关键词匹配；再不行就 0
+            if not selected:
+                tgt = intent.get("focus", {}).get("target", "")
+                hits = self._find_by_keywords_fallback(det_topk, [tgt] if tgt else [])
+                selected = hits
+                agent_trace["fallback_select"] = {"reason": "count_fix", "selected_n": len(selected), "target": tgt}
+            text = str(len(selected))
+
+        elif task_type == "RoomDetection":
+            # must do tool2 BBOX_UNION
+            agent_trace["budget"]["used"] += 1
+            agent_trace["tool2"] = {"tool": "BBOX_UNION"}
+
+            # 如果 MLLM 选太少，回退：按 room_type 的 hints 匹配；再不行 union 前 3 个
+            if len(selected) < 2:
+                room_type = intent.get("focus", {}).get("room_type", "")
+                fk = intent.get("focus", {}).get("focus_keywords", []) or []
+                if not fk:
+                    fk = self.ROOM_HINTS.get(room_type, [])
+                hits = self._find_by_keywords_fallback(det_topk, fk)
+                if len(hits) >= 2:
+                    selected = hits[:8]
+                else:
+                    selected = list(range(min(3, len(det_topk))))
+                agent_trace["fallback_select"] = {"reason": "room_fix", "room_type": room_type, "selected": selected}
+
+            bboxes = []
+            for i in selected:
+                bb = det_topk[i].get("BoundingBox")
+                if isinstance(bb, list) and len(bb) == 6:
+                    bboxes.append(bb)
+            union = self.geom.union_bbox(bboxes) if bboxes else det_topk[0].get("BoundingBox")
+
+            room_label = intent.get("focus", {}).get("room_type", "") or "unknown"
+            text = f"{room_label} {union}"
+
+        else:
+            text = "unknown"
+
+        agent_trace["selected_indices_final"] = selected
+
+        # Reflection: one-shot validation + fallback
+        text_fixed, refl = self.reflection_fix(task_type, intent, det_topk, selected, text)
+        agent_trace["reflection"] = refl
+        return text_fixed, agent_trace
 
 
+# -------------------------
+# Args / main
+# -------------------------
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('--task_type', type=str, default='Counting',
-                        choices=['VisualGrounding_plus', 'Counting', 'RoomDetection', 'PositionRelation'],
-                        help='任务类型，可选 VG+、计数、房间类型、相对位置')
-    parser.add_argument('--base-data-path', type=str, default='/data/HTC/Data/dataset/Benchmark/data',
-                        help='基准数据根路径')
-    parser.add_argument('--answers-dir', type=str, default='../answers',
-                        help='输出答案 jsonl 的目录')
-    parser.add_argument('--choose', type=bool, default=True, help='兼容旧代码的占位开关，不影响运行')
-    parser.add_argument('--gpu', type=int, default=1, help='指定使用的 GPU 编号，例如 0 或 1')
+                        choices=['VisualGrounding_plus', 'Counting', 'RoomDetection', 'PositionRelation'])
+    parser.add_argument('--base-data-path', type=str, default='/data/HTC/Data/dataset/Benchmark/data')
+    parser.add_argument('--answers-dir', type=str, default='../answers')
+    parser.add_argument('--gpu', type=int, default=1)
 
-    # model paths (defaults align with inference_3d.py)
-    parser.add_argument('--encoder_pretrain', type=str, default='epcl', choices=('clip', 'epcl'),
-                        help='视觉编码器预训练权重类型')
+    # model paths (align with inference_3d.py)
+    parser.add_argument('--encoder_pretrain', type=str, default='epcl', choices=('clip', 'epcl'))
     parser.add_argument('--encoder_ckpt_path', type=str,
-                        default='/data/HTC/Data/model_zoo/epcl_ckpt/epcl_scannet_vit-L-14_256tokens_latest.pth',
-                        help='视觉编码器 checkpoint 路径')
-    parser.add_argument('--vicuna_ckpt_path', type=str, default='/data/HTC/Data/model_zoo/vicuna-7b/Vicuna_7B_v0',
-                        help='Vicuna 权重路径')
-    parser.add_argument('--delta_ckpt_path', type=str, default='/data/HTC/Data/model_zoo/llm_v1/ALL1/pytorch_model_ep1.pt',
-                        help='LoRA/PEFT delta 权重路径')
-    # openlamm.py expects this key in args
-    parser.add_argument('--train_stage', type=int, default=2,
-                        help='1 for obj alignment;2for test；3 for fintune')
-    parser.add_argument('--stage', type=int, default=2, help='同 train_stage，保持接口兼容')
+                        default='/data/HTC/Data/model_zoo/epcl_ckpt/epcl_scannet_vit-L-14_256tokens_latest.pth')
+    parser.add_argument('--vicuna_ckpt_path', type=str, default='/data/HTC/Data/model_zoo/vicuna-7b/Vicuna_7B_v0')
+    parser.add_argument('--delta_ckpt_path', type=str, default='/data/HTC/Data/model_zoo/llm_v1/ALL1/pytorch_model_ep1.pt')
 
-    # LoRA configurations (openlamm.py expects these keys)
-    parser.add_argument('--lora_r', type=int, default=32, help='LoRA 秩大小')
-    parser.add_argument('--lora_alpha', type=int, default=32, help='LoRA alpha 缩放')
-    parser.add_argument('--lora_dropout', type=float, default=0.1, help='LoRA dropout 概率')
-    parser.add_argument('--lora_target_modules', nargs='+', default=['q_proj', 'k_proj', 'v_proj', 'o_proj'],
-                        help='应用 LoRA 的模块列表')
+    parser.add_argument('--train_stage', type=int, default=2)
+    parser.add_argument('--stage', type=int, default=2)
+
+    # LoRA configs (openlamm expects)
+    parser.add_argument('--lora_r', type=int, default=32)
+    parser.add_argument('--lora_alpha', type=int, default=32)
+    parser.add_argument('--lora_dropout', type=float, default=0.1)
+    parser.add_argument('--lora_target_modules', nargs='+', default=['q_proj', 'k_proj', 'v_proj', 'o_proj'])
 
     # generation
-    parser.add_argument('--max_tgt_len', type=int, default=1200, help='生成的最大文本长度')
-    parser.add_argument('--conv_mode', type=str, default='simple', help='对话模板名称')
-    parser.add_argument('--bs', type=int, default=1, help='推理 batch size')
-    parser.add_argument('--local_rank', default=0, type=int, help='分布式本地 rank（单卡可忽略）')
-    parser.add_argument('--vision_feature_type', type=str, default='local', choices=('local', 'global'),
-                        help='视觉特征使用局部还是全局')
-    parser.add_argument('--vision_output_layer', type=int, default=-2, help='使用的视觉 backbone 输出层索引')
-    parser.add_argument('--num_vision_token', type=int, default=256, help='视觉 token 数量')
-    parser.add_argument('--max_obj_len', type=int, default=30, help='单个对象的最大 token 长度')
+    parser.add_argument('--max_tgt_len', type=int, default=1200)
+    parser.add_argument('--conv_mode', type=str, default='simple')
+    parser.add_argument('--bs', type=int, default=1)
+    parser.add_argument('--local_rank', default=0, type=int)
+
+    parser.add_argument('--vision_feature_type', type=str, default='local', choices=('local', 'global'))
+    parser.add_argument('--vision_output_layer', type=int, default=-2)
+    parser.add_argument('--num_vision_token', type=int, default=256)
+    parser.add_argument('--max_obj_len', type=int, default=30)
 
     # agent budget + ablations
-    parser.add_argument('--max_obj', type=int, default=20,
-                        help='候选 proposal 上限（0-20，子任务最多取 20）')
-    parser.add_argument('--budget_detector', type=int, default=1, help='检测器调用预算，当前复用现有检测结果')
-    parser.add_argument('--wo_reflection', action='store_true', help='关闭反思步骤')
-    parser.add_argument('--wo_tool', action='store_true', help='关闭工具调用，仅用基准式回答')
-    parser.add_argument('--dry_run', type=int, default=10, help='>0 时仅跑前 N 条样本用于快速检查')
-    parser.add_argument('--do_sample', action='store_true',
-                        help='开启采样生成；默认关闭以使用 greedy，避免概率 nan 触发 CUDA assert')
+    parser.add_argument('--max_obj', type=int, default=20)
+    parser.add_argument('--wo_reflection', action='store_true')
+    parser.add_argument('--wo_tool', action='store_true')
+    parser.add_argument('--dry_run', type=int, default=10)
+    parser.add_argument('--do_sample', action='store_true')
 
     # detector artifacts
     parser.add_argument('--detection_meta', type=str,
-                        default='/data/HTC/Data/dataset/Benchmark/data/metadata/Detection.json',
-                        help='scene->object 的检测元数据路径')
+                        default='/data/HTC/Data/dataset/Benchmark/data/metadata/Detection.json')
     parser.add_argument('--detection_test', type=str,
-                        default='/data/HTC/Data/dataset/Benchmark/Task/Task_Reconstruct/Test/Detection.json',
-                        help='按索引存储的测试检测结果路径')
+                        default='/data/HTC/Data/dataset/Benchmark/Task/Task_Reconstruct/Test/Detection.json')
     parser.add_argument('--objpoints_path', type=str,
-                        default='/data/HTC/Project/Point-BERT/data/ModelNet/modelnet40_normal_resampled/my_test_1024pts_fps.dat',
-                        help='用于分类等任务的独立对象点云缓存路径')
+                        default='/data/HTC/Project/Point-BERT/data/ModelNet/modelnet40_normal_resampled/my_test_1024pts_fps.dat')
 
     args = parser.parse_args()
 
@@ -427,26 +732,20 @@ def main():
 
     device = torch.device(f'cuda:{args.gpu}' if torch.cuda.is_available() else 'cpu')
     if device.type == 'cuda':
-        torch.cuda.set_device(device)
+        # FIX: set_device expects int/str, not torch.device
+        torch.cuda.set_device(args.gpu)
 
     model = LAMMPEFTModel(**args.__dict__)
     delta_ckpt = torch.load(args.delta_ckpt_path, map_location=torch.device('cpu'))
     model.load_state_dict(delta_ckpt, strict=False)
     model.llama_model = model.llama_model.merge_and_unload()
-    # 将模型移动到指定设备并使用 FP16 提升推理速度
     model = model.eval().half().to(device)
 
-    # For scene tasks (Counting/VG/Room/PositionRelation), we follow inference_3d: use detection bboxes only.
-    # The objpoints cache is for object-level classification; keep it unused here to avoid mismatch.
-    list_of_objpoints_all = None
-
     det_tool = DetectionTool3D(args.detection_meta, args.detection_test)
-    agent = Agent3D(args, model, det_tool)
+    agent = Agent3D(args, model, det_tool, device=device)
 
     dataloader = load_3Deval_dataset(args.base_data_path, args.task_type, mode='common', batch_size=args.bs)
-    sys_msg = dataloader.dataset.system_msg
 
-    # 输出文件命名与 inference_3d.py 对齐：<task_type>.jsonl
     answers_file = os.path.join(args.answers_dir, f"{args.task_type}.jsonl")
     os.makedirs(os.path.dirname(answers_file), exist_ok=True)
 
@@ -456,13 +755,10 @@ def main():
                 break
 
             pcl_paths = data_item['pcl']
-            obj_list = det_tool.proposals_for_scene(pcl_paths[0], idx, args.task_type)
-
-            # Scene tasks: no per-object point clouds; openlamm crops via detection bboxes internally
-            list_of_objpoints = []
+            obj_list = det_tool.proposals_for_scene(pcl_paths[0], idx)
 
             start = time.time()
-            text, trace = agent.solve(args.task_type, sys_msg, data_item, obj_list, list_of_objpoints)
+            text, trace = agent.solve(args.task_type, data_item, obj_list)
             elapsed = time.time() - start
 
             ans = {
@@ -470,6 +766,7 @@ def main():
                 'pcl': pcl_paths,
                 'text': text,
                 'delta_path': args.delta_ckpt_path,
+                'agent_trace': {**trace, 'elapsed': elapsed},
             }
             fout.write(json.dumps(ans) + '\n')
             fout.flush()

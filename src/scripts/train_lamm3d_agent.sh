@@ -11,10 +11,9 @@ mkdir -p ${ckpt_dir}/${exp}/log_rest/
 deepspeed --include localhost:1 --master_addr 127.0.0.1 --master_port 28451 train.py \
     --train_stage 3 \
     --cfg /data/HTC/Project/llm/src/config/train_ds3.yaml \
-    --data_path  /data/HTC/Data/dataset/Benchmark/Task/Task_Reconstruct/WholeTrain/Classification3d_demo.json \
+    --data_path  /data/HTC/Data/dataset/Benchmark/Task/Task_Reconstruct/WholeTrain/temp.json \
     --vision_root_path /data/HTC/Data/dataset \
     --vision_type pcl \
-    --use_system \
     --model lamm_peft \
     --encoder_pretrain epcl \
     --encoder_ckpt_path /data/HTC/Data/model_zoo/epcl_ckpt/epcl_scannet_vit-L-14_256tokens_latest.pth \

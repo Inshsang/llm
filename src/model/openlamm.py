@@ -221,10 +221,15 @@ def make_prompt_start(use_system=False, vision_type="image", task_type="normal")
         if task_type == "normal":
             return f"{conversations.default_conversation.system}\n\n" + PROMPT_START
         else:
-            return [
-                f"{conversations.conversation_dict[task]}\n\n" + PROMPT_START
-                for task in task_type
-            ]
+            if isinstance(task_type, (list, tuple)):
+                tasks = list(task_type)
+                return [
+                    f"{conversations.conversation_dict.get(str(task).strip(), conversations.conversation_dict.get('normal', conversations.default_conversation.system))}\n\n" + PROMPT_START
+                    for task in tasks
+                ]
+            task_key = str(task_type).strip()
+            sys_text = conversations.conversation_dict.get(task_key, conversations.conversation_dict.get('normal', conversations.default_conversation.system))
+            return f"{sys_text}\n\n" + PROMPT_START
     else:
         return PROMPT_START
 
@@ -377,23 +382,12 @@ class LAMMPEFTModel(nn.Module):
             target_modules=self.args["lora_target_modules"],
         )
 
-        if args.get('answers_dir', False):
-            self.llama_model = LlamaForCausalLM.from_pretrained(vicuna_ckpt_path)
-            self.llama_model = get_peft_model(self.llama_model, peft_config)
-            pass
-            # self.llama_model = LlamaLightForCausalLM(
-            #     batch_size=self.args['bs'],
-            #     max_input_len=1024,
-            #     max_output_len=args['max_tgt_len'],
-            #     weight_dir=vicuna_ckpt_path,
-            #     lora_path=args['delta_ckpt_path'],
-            #     lora_config=peft_config,
-            # )
-        else:
-            self.llama_model = LlamaForCausalLM.from_pretrained(vicuna_ckpt_path)
-            self.llama_model = get_peft_model(self.llama_model, peft_config)
 
-        # self.llama_proj = nn.Linear(256, self.llama_model.config.hidden_size)
+        self.llama_model = LlamaForCausalLM.from_pretrained(vicuna_ckpt_path)
+        self.llama_model = get_peft_model(self.llama_model, peft_config)
+        print("######################## Initial LLM ##########################")
+
+        
         self.llama_proj = nn.Sequential(
             # nn.Linear(self.trans_dim * 2, 256),
             nn.ReLU(inplace=True),
@@ -414,7 +408,6 @@ class LAMMPEFTModel(nn.Module):
                 nn.Linear(256, self.llama_model.config.hidden_size)
             )
             print("########################Initial llama_proj##########################")
-
         elif self.train_stage == 2:
             # 加载保存的参数
             llama_proj = torch.load("/data/HTC/Data/model_zoo/llm_exe/projector/llama_proj1.pth",map_location="cpu")
@@ -432,7 +425,7 @@ class LAMMPEFTModel(nn.Module):
             processed_llama = {key.replace("llama_proj.", ""): value for key, value in llama_proj.items()}
             self.llama_proj.load_state_dict(processed_llama)
 
-            print("######################## Initial llama_proj and LLM ##########################")
+            print("######################## Initial llama_proj ##########################")
 
         self.llama_tokenizer = LlamaTokenizer.from_pretrained(
             vicuna_ckpt_path, use_fast=False
@@ -982,17 +975,29 @@ class LAMMPEFTModel(nn.Module):
 
 
         batch_size = vision_embeds.shape[0]
+        use_system = bool(inputs.get("use_system", False))
         p_before = make_prompt_start(
-            vision_type=self.vision_type
-        )  # no system header in test
-        p_before_tokens = self.llama_tokenizer(
-            p_before, return_tensors="pt", add_special_tokens=False
-        ).to(self.device)
-        p_before_embeds = self.llama_model.model.embed_tokens(
-            p_before_tokens.input_ids
-        ).expand(
-            batch_size, -1, -1
-        )  # bsz x s1 x embed_dim
+            use_system=use_system,
+            vision_type=self.vision_type,
+            task_type=inputs.get("task_type", "normal"),
+        )
+        if isinstance(p_before, list):
+            p_before_tokens = self.llama_tokenizer(
+                p_before,
+                padding="longest",
+                add_special_tokens=False,
+                return_tensors="pt",
+            ).to(self.device)
+            p_before_embeds = self.llama_model.model.embed_tokens(p_before_tokens.input_ids)
+        else:
+            p_before_tokens = self.llama_tokenizer(
+                p_before, return_tensors="pt", add_special_tokens=False
+            ).to(self.device)
+            p_before_embeds = self.llama_model.model.embed_tokens(
+                p_before_tokens.input_ids
+            ).expand(
+                batch_size, -1, -1
+            )  # bsz x s1 x embed_dim
 
         p_after_texts = [f"{eov} " + prompt + "\n### Assistant:" for prompt in prompt_list]
         p_after_tokens = self.llama_tokenizer(
