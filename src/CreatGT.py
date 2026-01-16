@@ -1,3 +1,4 @@
+from functools import lru_cache
 import sys
 import math
 import os
@@ -1238,7 +1239,7 @@ def sort_item(i):
 # pro_sen = open(dirpath + "/../MYDATA/BenchMark/Task/GT/Detection.json", 'a')
 #
 # for i in range(0,30):
-#     scene_path = "/media/kou/Data1/htc/MYDATA/BenchMark/Task/GT/Detection/Detection" + str(i) + ".json"
+#     scene_path = "/media/kou/Data1/htc/MYDATA/BenchMark/Task/GT/Detection" + str(i) + ".json"
 #     sce = open(scene_path,"r")
 #     for item in jsonlines.Reader(sce):
 #         pro_sen.write(json.dumps(item) + "\n")
@@ -1439,56 +1440,74 @@ Detection_class = ["cabinet","bed","chair","sofa","diningtable","doorway","windo
 
 def Train_Agent():
     """
-    Agent training data for 4 tasks:
-    - VisualGrounding_plus: DETECT only, then select obj index (no tool2)
-    - Counting: DETECT -> COUNT
-    - RoomDetection: DETECT -> BBOX_UNION (indices decided by agent)
-    - PositionRelation: DETECT only, then select [A_idx, B_idx] (no tool2)
+    Agent training data for 4 tasks (2-tool budget):
+    - VisualGrounding_plus: DETECT -> (review select 1 idx) -> FINISH (output bbox)
+    - Counting: DETECT -> (review select explain-indices) -> COUNT(tool, using ALL proposals) -> FINISH (ceil to gt_choices if present)
+    - RoomDetection: DETECT -> (review outputs multiple room groups, each 2~8 idx) -> BBOX_UNION(tool, per-group) -> FINISH (output ALL rooms)
+    - PositionRelation: DETECT -> (review select A/B) -> REL_DIR(tool) -> FINISH (choose final option / natural language)
 
-    Output format follows getsinglejson(): {src_id,id,pcl,conversations,task_type,src_dataset}
-    We set task_type = "Agent3d" for all samples, and specify subtask inside prompt.
+    IMPORTANT:
+    - Do NOT leak "Subtask=...".
+    - RoomDetection asks: "Locate the locations of every room within the scene."
+      and outputs multiple room instances (can have multiple of same type).
+    - Counting: explain-indices are from top-20, but count uses ALL proposals; final uses gt_choices upward rounding.
+    - ROOM_SPACE is 4 rooms: bedroom/kitchen/livingroom/bathroom.
     """
+
+    import os, json, random, re
+    from typing import Any, Dict, List, Optional, Tuple
 
     root = "/data/HTC/Data/dataset"
     result = root + "/Benchmark/temp.json"
     outjson = []
 
     # ---------- Load templates / GT ----------
-    # Counting templates + GT
     Qc, Ac, GTc, _ = filepath('Counting')
-    Q_Counting, _, GT_Counting = loading(Qc, Ac, GTc)  # GT_Counting is list indexed by scene id
+    Q_Counting, _, GT_Counting = loading(Qc, Ac, GTc)  # list indexed by scene id (or dict-like)
 
-    # VG templates (no need GT strictly; use detect proposals as supervision)
     Qv, Av, GTv, _ = filepath('VisualGrounding')
     Q_VG, _, _ = loading(Qv, Av, Qv)
 
-    # PositionRelation templates
     Qp, Ap, GTp, _ = filepath('PositionRelation')
     Q_REL, _, _ = loading(Qp, Ap, Qp)
 
-    # RoomDetection templates + GT
     Qr, Ar, GTr, _ = filepath('RoomDetection')
-    Q_ROOM, _, GT_ROOM = loading(Qr, Ar, GTr)  # GT_ROOM is dict: scene_id -> {room_type: points...}
+    Q_ROOM, _, GT_ROOM = loading(Qr, Ar, GTr)
 
-    # Detection proposals (scene -> object list)
+    # Detection proposals
     det_meta_path = root + "/Benchmark/data/metadata/Detection.json"
     det_meta = json.load(open(det_meta_path, 'r'))
 
-    # Minimal room hint mapping (for training indices selection)
+    # ---- 4-room space only (user confirmed) ----
+    ROOM_SPACE = ["bedroom", "kitchen", "livingroom", "bathroom"]
+
+    # Minimal room hint mapping (used only to synthesize supervision groups)
     ROOM_HINTS = {
-        "bedroom": ["bed", "door", "doorway", "wardrobe", "nightstand", "dresser"],
-        "kitchen": ["fridge", "stove", "sink", "cabinet", "countertop", "microwave"],
+        "bedroom":    ["bed", "door", "doorway", "wardrobe", "nightstand", "dresser"],
+        "kitchen":    ["fridge", "stove", "sink", "cabinet", "countertop", "microwave"],
         "livingroom": ["sofa", "tv", "television", "door", "doorway", "coffeetable"],
-        "bathroom": ["toilet", "sink", "door", "doorway", "shower", "bathtub"],
-        "diningroom": ["diningtable", "table", "chair", "cabinet"],
-        "office": ["desk", "chair", "door", "doorway", "bookshelf", "shelf"],
+        "bathroom":   ["toilet", "sink", "door", "doorway", "shower", "bathtub"],
     }
 
+    # ---------- helpers ----------
     def norm(s: str) -> str:
         return ''.join(ch for ch in (s or '').lower() if ch.isalnum())
 
+    def get_bbox(o: Dict[str, Any]) -> Optional[List[float]]:
+        bb = o.get("BoundingBox", None)
+        if isinstance(bb, list) and len(bb) == 6:
+            return bb
+        return None
+
+    def center_of_bbox(bb: List[float]) -> Tuple[float, float, float]:
+        # support both minmax or center formats (best-effort)
+        # if minmax: [xmin,ymin,zmin,xmax,ymax,zmax]
+        if bb[0] <= bb[3] and bb[1] <= bb[4] and bb[2] <= bb[5]:
+            return ((bb[0] + bb[3]) / 2.0, (bb[1] + bb[4]) / 2.0, (bb[2] + bb[5]) / 2.0)
+        # else treat as center format [cx,cy,cz,l,w,h]
+        return (bb[0], bb[1], bb[2])
+
     def format_detect_list(det_topk: List[Dict[str, Any]]) -> str:
-        # 给 agent review 用：obj0..obj19 列表（包含 bbox）
         lines = []
         for i, o in enumerate(det_topk):
             name = (o.get("name", "") or o.get("label", "") or "").lower()
@@ -1496,12 +1515,12 @@ def Train_Agent():
             lines.append(f"(obj{i}):{name} bbox={bbox}")
         return "\n".join(lines)
 
-    def find_indices_by_keywords(det_topk: List[Dict[str, Any]], keywords: List[str]) -> List[int]:
+    def find_indices_by_keywords(det_list: List[Dict[str, Any]], keywords: List[str]) -> List[int]:
         kws = [norm(k) for k in (keywords or []) if k]
         if not kws:
             return []
         hits = []
-        for i, o in enumerate(det_topk):
+        for i, o in enumerate(det_list):
             n = norm(o.get("name", "") or o.get("label", ""))
             for k in kws:
                 if k and k in n:
@@ -1510,66 +1529,193 @@ def Train_Agent():
         return hits
 
     def unique_name_indices(det_topk: List[Dict[str, Any]]) -> List[int]:
-        # 只选 topk 内唯一名称，避免同名多实例导致监督不稳定
         cnt = {}
         for o in det_topk:
             n = norm(o.get("name", "") or o.get("label", ""))
             if not n:
                 continue
             cnt[n] = cnt.get(n, 0) + 1
-        idxs = []
-        for i, o in enumerate(det_topk):
-            n = norm(o.get("name", "") or o.get("label", ""))
-            if n and cnt.get(n, 0) == 1:
-                idxs.append(i)
-        return idxs
+        return [i for i, o in enumerate(det_topk)
+                if (n := norm(o.get("name", "") or o.get("label", ""))) and cnt.get(n, 0) == 1]
 
-    def make_intent_prompt(subtask: str, user_question: str) -> str:
-        # Intent: 输出工具调用 JSON（1步或2步）
+    def ceil_to_choices(v: int, choices: List[int]) -> int:
+        if not choices:
+            return v
+        ch = sorted(int(x) for x in choices)
+        for c in ch:
+            if c >= v:
+                return c
+        return ch[-1]
+
+    # ---- Position relation tool: getdir (your rule) ----
+    def getdir(p0, p1):
+        x0, y0, z0 = p0[:3]
+        x1, y1, z1 = p1[:3]
+        dis = 0.5
+        if abs(y0 - y1) > dis and abs(x0 - x1) < dis and abs(z0 - z1) < dis:  # up/down
+            if y0 > y1:
+                return random.randint(240, 269), 0
+            elif y0 < y1:
+                return random.randint(210, 239), 0
+        elif abs(y0 - y1) < 2 * dis and abs(x0 - x1) > dis and abs(z0 - z1) < dis:  # left/right
+            if x0 > x1:
+                return random.randint(60, 89), 0
+            elif x0 < x1:
+                return random.randint(30, 59), 0
+        elif abs(y0 - y1) < 2 * dis and abs(x0 - x1) < dis and abs(z0 - z1) > dis:  # front/back
+            if z0 > z1:
+                return random.randint(90, 119), 0
+            elif z0 < z1:
+                return random.randint(120, 149), 0
+        elif abs(y0 - y1) < 2 * dis and abs(x0 - x1) > dis and abs(z0 - z1) > dis:  # diagonal
+            if z0 > z1 and x0 > x1:
+                return random.randint(150, 179), 0  # a left-front of b
+            elif z0 > z1 and x0 < x1:
+                return random.randint(180, 209), 0  # a right-front of b
+            elif z0 < z1 and x0 > x1:
+                return random.randint(180, 209), 1  # b left-back of a
+            elif z0 < z1 and x0 < x1:
+                return random.randint(150, 179), 1  # b right-back of a
+        else:
+            return 0, -1
+
+    # ---------- prompts (NO Subtask leakage) ----------
+    def make_intent_prompt(user_question: str) -> str:
         return (
-            f"[AGENT_INTENT]\n"
-            f"Subtask={subtask}\n"
+            "[AGENT_INTENT]\n"
             f"UserQuestion: {user_question}\n\n"
             "You are an MLLM agent controller. Output ONE JSON only.\n"
             "Schema:\n"
             "{\n"
             "  \"stage\":\"intent\",\n"
             "  \"task\":\"VisualGrounding_plus|Counting|RoomDetection|PositionRelation\",\n"
-            "  \"focus\": {\"target\":\"\", \"A\":\"\", \"B\":\"\", \"room_type\":\"\", \"focus_keywords\":[]},\n"
-            "  \"tool_plan\": [ {\"tool\":\"DETECT\",\"args\":{\"topk\":20}}, {\"tool\":\"COUNT|BBOX_UNION\",\"args\":{}} ]\n"
+            "  \"focus\": {\"target\":\"\", \"A\":\"\", \"B\":\"\"}\n"
             "}\n"
-            "Rules:\n"
-            "- Counting: tool_plan must be [DETECT, COUNT]\n"
-            "- RoomDetection: tool_plan must be [DETECT, BBOX_UNION]\n"
-            "- VisualGrounding_plus: tool_plan must be [DETECT]\n"
-            "- PositionRelation: tool_plan must be [DETECT]\n"
         )
 
-    def make_review_prompt(subtask: str, user_question: str, det_topk: List[Dict[str, Any]]) -> str:
-        # Review: 根据 DETECT 返回，做总结 + 选择关注对象 indices + 决定 tool2
+    def make_review_prompt(user_question: str, det_topk: List[Dict[str, Any]]) -> str:
         detect_text = format_detect_list(det_topk)
         return (
-            f"[TOOL_RESULT]\n"
-            f"Tool=DETECT\n"
+            "[TOOL_RESULT]\n"
+            "Tool=DETECT\n"
             f"Objects(topk={len(det_topk)}):\n{detect_text}\n\n"
-            f"[AGENT_REVIEW]\n"
-            f"Subtask={subtask}\n"
+            "[AGENT_REVIEW]\n"
             f"UserQuestion: {user_question}\n\n"
             "Output ONE JSON only.\n"
             "Schema:\n"
             "{\n"
             "  \"stage\":\"review\",\n"
             "  \"summary\":\"one short sentence\",\n"
-            "  \"need_tool2\": true/false,\n"
             "  \"selected_object_indices\": [int, ...],\n"
-            "  \"next_tool\": {\"tool\":\"NONE|COUNT|BBOX_UNION\", \"args\": {}}\n"
+            "  \"room_groups\": [ {\"room_label\":\"bedroom|kitchen|livingroom|bathroom\", \"indices\":[int,...]} ],\n"
+            "  \"next_tool\": {\"tool\":\"FINISH|COUNT|BBOX_UNION|REL_DIR\", \"args\": {}}\n"
             "}\n"
             "Rules:\n"
-            "- VisualGrounding_plus: select EXACTLY 1 index; need_tool2=false; next_tool.tool=\"NONE\".\n"
-            "- PositionRelation: select EXACTLY 2 indices [A_idx,B_idx]; need_tool2=false; next_tool.tool=\"NONE\".\n"
-            "- Counting: select indices that match target; need_tool2=true; next_tool.tool=\"COUNT\".\n"
-            "- RoomDetection: select 2~8 indices that define the room extent; need_tool2=true; next_tool.tool=\"BBOX_UNION\".\n"
+            "- VisualGrounding_plus: selected_object_indices must have EXACTLY 1 index; next_tool.tool=\"FINISH\".\n"
+            "- Counting: selected_object_indices are for explanation (from top-20); next_tool.tool=\"COUNT\".\n"
+            "- PositionRelation: selected_object_indices must have EXACTLY 2 indices [A_idx,B_idx]; next_tool.tool=\"REL_DIR\".\n"
+            "- RoomDetection: fill room_groups with 1~N groups; each group indices size in [2,8]; next_tool.tool=\"BBOX_UNION\".\n"
         )
+
+    def make_finish_prompt(user_question: str, tool2_result_text: str) -> str:
+        def simplify_bbox(bbox_text: str) -> str:
+            import re
+            def round_numbers(match):
+                return f"{float(match.group()):.2f}"
+
+            return re.sub(r"-?\d+\.\d+", round_numbers, bbox_text)
+
+        simplified_result = simplify_bbox(tool2_result_text)
+        return (
+            "[TOOL_RESULT]\n"
+            f"{simplified_result}\n\n"
+            "[AGENT_FINISH]\n"
+            f"UserQuestion: {user_question}\n\n"
+            "Output the FINAL answer only (no JSON).\n"
+            "For Counting: output a single integer (already matched to choices).\n"
+            "For PositionRelation: output the final option / statement consistent with the question.\n"
+            "For RoomDetection: output all room_label + bbox, one room per sentence.\n"
+        )
+
+    # ---------- tool simulators (for building supervised conversations) ----------
+    def tool_count_all(all_objs: List[Dict[str, Any]], target: str) -> int:
+        # use ALL proposals (not limited to 20)
+        hits = find_indices_by_keywords(all_objs, [target])
+        return len(hits)
+
+    REL_TEMPLATE_PATH = "/data/HTC/Data/dataset/Benchmark/Task/Template/A_PositionRelation.json"
+
+    @lru_cache(maxsize=1)
+    def _rel_templates():
+        with open(REL_TEMPLATE_PATH, "r") as f:
+            d = json.load(f)
+        return {str(k): str(v) for k, v in d.items()}
+
+    def tool_rel_dir(det_topk: List[Dict[str, Any]], a_idx: int, b_idx: int) -> Dict[str, Any]:
+        bbA = get_bbox(det_topk[a_idx]) or [0, 0, 0, 0, 0, 0]
+        bbB = get_bbox(det_topk[b_idx]) or [0, 0, 0, 0, 0, 0]
+        pA = center_of_bbox(bbA)
+        pB = center_of_bbox(bbB)
+        qid, flip = getdir(pA, pB)
+        # 1) qid 直接索引模板
+        tmpl = _rel_templates().get(str(qid), "")
+
+        # 2) flip=1 就反一下（交换 C1/C2）
+        if tmpl and int(flip) == 1:
+            tmpl = tmpl.replace("C1", "__TMP__").replace("C2", "C1").replace("__TMP__", "C2")
+
+        return {"qid": int(qid), "flip": int(flip), "text": tmpl}
+
+    def tool_union_groups(det_topk: List[Dict[str, Any]], groups: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        # union bbox per group (minmax union)
+        out = []
+        for g in groups:
+            indices = [int(i) for i in (g.get("indices") or [])]
+            indices = [i for i in indices if 0 <= i < len(det_topk)]
+            bbs = [get_bbox(det_topk[i]) for i in indices]
+            bbs = [bb for bb in bbs if bb is not None]
+            if not bbs:
+                continue
+            # union (minmax)
+            mins = [float("inf")] * 3
+            maxs = [float("-inf")] * 3
+            for bb in bbs:
+                # treat as minmax if plausible else convert from center
+                if not (bb[0] <= bb[3] and bb[1] <= bb[4] and bb[2] <= bb[5]):
+                    cx, cy, cz, l, w, h = bb
+                    bb = [cx - l/2, cy - h/2, cz - w/2, cx + l/2, cy + h/2, cz + w/2]
+                mins[0] = min(mins[0], bb[0]); mins[1] = min(mins[1], bb[1]); mins[2] = min(mins[2], bb[2])
+                maxs[0] = max(maxs[0], bb[3]); maxs[1] = max(maxs[1], bb[4]); maxs[2] = max(maxs[2], bb[5])
+            out.append({"room_label": g.get("room_label", "unknown"), "bbox": [mins[0], mins[1], mins[2], maxs[0], maxs[1], maxs[2]]})
+        return out
+
+    def split_room_into_instances(det_topk: List[Dict[str, Any]], base_indices: List[int], max_instances: int = 2) -> List[List[int]]:
+        """
+        Make multiple room instances for same label (best-effort) by simple spatial split.
+        - If many indices, split by median X of bbox centers into up to 2 clusters.
+        - Otherwise single instance.
+        """
+        idxs = [i for i in base_indices if 0 <= i < len(det_topk)]
+        if len(idxs) < 4 or max_instances <= 1:
+            return [idxs] if idxs else []
+        xs = []
+        for i in idxs:
+            bb = get_bbox(det_topk[i])
+            if bb is None:
+                xs.append((i, 0.0))
+            else:
+                cx, _, _ = center_of_bbox(bb)
+                xs.append((i, cx))
+        xs.sort(key=lambda t: t[1])
+        mid = len(xs) // 2
+        g1 = [i for i, _ in xs[:mid]]
+        g2 = [i for i, _ in xs[mid:]]
+        groups = []
+        if len(g1) >= 2:
+            groups.append(g1)
+        if len(g2) >= 2:
+            groups.append(g2)
+        return groups[:max_instances] if groups else [idxs]
 
     # ---------- Generate samples ----------
     sample_id = 0
@@ -1578,14 +1724,15 @@ def Train_Agent():
         sid_str = str(sid)
         pcl_path = "scene/" + sid_str + ".npy"
 
-        # proposals top-20
-        det_objs = det_meta.get(sid_str, [])
-        det_topk = det_objs[:20]
-        if len(det_topk) == 0:
+        all_objs = det_meta.get(sid_str, [])
+        if not all_objs:
+            continue
+        det_topk = all_objs[:20]
+        if not det_topk:
             continue
 
         # -----------------------
-        # 1) VisualGrounding_plus (1 sample / scene if possible)
+        # 1) VisualGrounding_plus
         # -----------------------
         uniq_idxs = unique_name_indices(det_topk)
         if len(uniq_idxs) >= 1:
@@ -1594,168 +1741,250 @@ def Train_Agent():
             vg_name_norm = norm(vg_name)
             if vg_name_norm:
                 qtemp = Q_VG[str(random.randint(0, 29))]
-                # template may contain {C}
-                if "{C}" in qtemp:
-                    user_q = re.sub(r"{C}", vg_name, qtemp)
-                else:
-                    user_q = qtemp + " " + vg_name
+                user_q = re.sub(r"{C}", vg_name, qtemp) if "{C}" in qtemp else (qtemp + " " + vg_name)
 
                 intent_ans = {
                     "stage": "intent",
                     "task": "VisualGrounding_plus",
-                    "focus": {"target": vg_name_norm, "A": "", "B": "", "room_type": "", "focus_keywords": []},
-                    "tool_plan": [{"tool": "DETECT", "args": {"topk": 20}}],
+                    "focus": {"target": vg_name_norm, "A": "", "B": ""},
                 }
                 review_ans = {
                     "stage": "review",
-                    "summary": f"Select the object matching target={vg_name_norm}.",
-                    "need_tool2": False,
+                    "summary": "Select the referred object index, then finish with its bbox.",
                     "selected_object_indices": [int(vg_idx)],
-                    "next_tool": {"tool": "NONE", "args": {}},
+                    "room_groups": [],
+                    "next_tool": {"tool": "FINISH", "args": {}},
                 }
+                bb = get_bbox(det_topk[vg_idx])
+                final_text = str(bb) if bb is not None else "unknown"
 
                 conversations = [
-                    {"from": "human", "value": make_intent_prompt("VisualGrounding_plus", user_q)},
+                    {"from": "human", "value": make_intent_prompt(user_q)},
                     {"from": "gpt", "value": json.dumps(intent_ans, ensure_ascii=False)},
-                    {"from": "human", "value": make_review_prompt("VisualGrounding_plus", user_q, det_topk)},
+                    {"from": "human", "value": make_review_prompt(user_q, det_topk)},
                     {"from": "gpt", "value": json.dumps(review_ans, ensure_ascii=False)},
+                    {"from": "human", "value": make_finish_prompt(user_q, "Tool=FINISH\n(ready)")},
+                    {"from": "gpt", "value": final_text},
                 ]
                 outjson.append(getsinglejson(sid_str, str(sample_id), pcl_path, conversations, "Agent3d"))
                 sample_id += 1
 
         # -----------------------
-        # 2) Counting (up to 2 samples / scene)
+        # 2) Counting
         # -----------------------
         try:
-            gt_count = GT_Counting[sid]  # dict: {class: num}
-            if isinstance(gt_count, dict) and len(gt_count) > 0:
-                keys = list(gt_count.keys())
-                random.shuffle(keys)
-                keys = keys[:2]  # at most 2 per scene
-                for objclass in keys:
-                    obj_norm = norm(objclass)
-                    if not obj_norm:
-                        continue
-                    qtemp = Q_Counting[str(random.randint(0, 29))]
-                    user_q = re.sub(r"{C}", objclass, qtemp) if "{C}" in qtemp else (qtemp + " " + objclass)
-
-                    intent_ans = {
-                        "stage": "intent",
-                        "task": "Counting",
-                        "focus": {"target": obj_norm, "A": "", "B": "", "room_type": "", "focus_keywords": []},
-                        "tool_plan": [
-                            {"tool": "DETECT", "args": {"topk": 20}},
-                            {"tool": "COUNT", "args": {"target": obj_norm}},
-                        ],
-                    }
-
-                    # review：用 detection top-20 的名字匹配构造 indices（监督稳定，不依赖 GT 数字）
-                    matched = find_indices_by_keywords(det_topk, [obj_norm])
-                    review_ans = {
-                        "stage": "review",
-                        "summary": f"Found {len(matched)} candidates for target={obj_norm}, call COUNT.",
-                        "need_tool2": True,
-                        "selected_object_indices": matched,
-                        "next_tool": {"tool": "COUNT", "args": {"target": obj_norm}},
-                    }
-
-                    conversations = [
-                        {"from": "human", "value": make_intent_prompt("Counting", user_q)},
-                        {"from": "gpt", "value": json.dumps(intent_ans, ensure_ascii=False)},
-                        {"from": "human", "value": make_review_prompt("Counting", user_q, det_topk)},
-                        {"from": "gpt", "value": json.dumps(review_ans, ensure_ascii=False)},
-                    ]
-                    outjson.append(getsinglejson(sid_str, str(sample_id), pcl_path, conversations, "Agent3d"))
-                    sample_id += 1
+            gt_count = GT_Counting[sid]  # dict: {class: num} (if available)
         except Exception:
-            pass
+            gt_count = None
+
+        if isinstance(gt_count, dict) and len(gt_count) > 0:
+            keys = list(gt_count.keys())
+            random.shuffle(keys)
+            keys = keys[:1]
+            for objclass in keys:
+                obj_norm = norm(objclass)
+                if not obj_norm:
+                    continue
+                qtemp = Q_Counting[str(random.randint(0, 29))]
+                user_q = re.sub(r"{C}", objclass, qtemp) if "{C}" in qtemp else (qtemp + " " + objclass)
+
+                # explain indices from top-20 only
+                explain = find_indices_by_keywords(det_topk, [obj_norm])
+
+                # tool COUNT uses ALL objs
+                count_all = tool_count_all(all_objs, obj_norm)
+
+                # upward rounding to choices (if you have choices in GTc; otherwise keep raw)
+                # NOTE: keep this logic minimal + safe
+                choices = None
+                try:
+                    # if your GT file provides choices per sample, plug it here
+                    # e.g., GTc[sid] might be dict with "choices"
+                    if isinstance(GTc, dict) and sid_str in GTc and isinstance(GTc[sid_str], dict):
+                        choices = GTc[sid_str].get("choices", None)
+                except Exception:
+                    choices = None
+
+                final_count = int(count_all)
+                if isinstance(choices, list) and choices:
+                    final_count = ceil_to_choices(final_count, choices)
+
+                intent_ans = {
+                    "stage": "intent",
+                    "task": "Counting",
+                    "focus": {"target": obj_norm, "A": "", "B": ""},
+                }
+                review_ans = {
+                    "stage": "review",
+                    "summary": "Select indices for explanation (top-20), then call COUNT over all proposals.",
+                    "selected_object_indices": explain,
+                    "room_groups": [],
+                    "next_tool": {"tool": "COUNT", "args": {"target": obj_norm, "use_all": True}},
+                }
+                tool2_text = f"Tool=COUNT\nTarget={obj_norm}\ncount_all={count_all}\nfinal_count={final_count}"
+
+                conversations = [
+                    {"from": "human", "value": make_intent_prompt(user_q)},
+                    {"from": "gpt", "value": json.dumps(intent_ans, ensure_ascii=False)},
+                    {"from": "human", "value": make_review_prompt(user_q, det_topk)},
+                    {"from": "gpt", "value": json.dumps(review_ans, ensure_ascii=False)},
+                    {"from": "human", "value": make_finish_prompt(user_q, tool2_text)},
+                    {"from": "gpt", "value": str(final_count)},
+                ]
+                outjson.append(getsinglejson(sid_str, str(sample_id), pcl_path, conversations, "Agent3d"))
+                sample_id += 1
 
         # -----------------------
-        # 3) RoomDetection (1 sample / scene if GT exists)
+        # 3) RoomDetection (ALL rooms, possibly multiple instances per type)
         # -----------------------
-        if sid_str in GT_ROOM and isinstance(GT_ROOM[sid_str], dict) and len(GT_ROOM[sid_str]) > 0:
-            room_types = list(GT_ROOM[sid_str].keys())
-            room_type = random.choice(room_types)
-            room_norm = norm(room_type) or "other"
+        # Always generate (doesn't rely on GT_ROOM), because the training signal is index grouping + union.
+        user_q = "Locate the locations of every room within the scene."
 
-            # question template
-            qtemp = Q_ROOM.get(str(random.randint(0, 29)), "Where is the {R} in the scene?")
-            if "{R}" in qtemp:
-                user_q = re.sub(r"{R}", room_type, qtemp)
-            else:
-                user_q = qtemp + " " + room_type
+        intent_ans = {
+            "stage": "intent",
+            "task": "RoomDetection",
+            "focus": {"target": "", "A": "", "B": ""},
+        }
 
-            # focus keywords: from mapping, fallback empty -> agent decides later
-            fk = ROOM_HINTS.get(room_norm, [])
-            fk = [norm(x) for x in fk if x]
+        room_groups = []
+        # Build groups per room label; allow multiple instances by splitting indices into clusters
+        for room_label in ROOM_SPACE:
+            fk = [norm(x) for x in (ROOM_HINTS.get(room_label, []) or []) if x]
+            base = find_indices_by_keywords(det_topk, fk)
 
-            intent_ans = {
-                "stage": "intent",
-                "task": "RoomDetection",
-                "focus": {"target": "", "A": "", "B": "", "room_type": room_norm, "focus_keywords": fk},
-                "tool_plan": [
-                    {"tool": "DETECT", "args": {"topk": 20}},
-                    {"tool": "BBOX_UNION", "args": {}},
-                ],
-            }
+            # if too few, fallback to some generic large objects (still 2~8)
+            if len(base) < 2:
+                base = list(range(min(4, len(det_topk))))
 
-            # review：用关键词命中 indices；太少则回退 top3
-            selected = find_indices_by_keywords(det_topk, fk)
-            if len(selected) < 2:
-                selected = list(range(min(3, len(det_topk))))
+            # split into multiple instances (best-effort)
+            inst_groups = split_room_into_instances(det_topk, base, max_instances=2)
+            for g in inst_groups:
+                g = g[:8]
+                if len(g) >= 2:
+                    room_groups.append({"room_label": room_label, "indices": g})
 
-            review_ans = {
-                "stage": "review",
-                "summary": f"Use objects related to {room_norm} to compute room bbox by union.",
-                "need_tool2": True,
-                "selected_object_indices": selected[:8],
-                "next_tool": {"tool": "BBOX_UNION", "args": {"indices": selected[:8], "room_type": room_norm}},
-            }
+        # Ensure at least one group
+        if not room_groups:
+            room_groups = [{"room_label": "livingroom", "indices": list(range(min(4, len(det_topk))))}]
 
-            conversations = [
-                {"from": "human", "value": make_intent_prompt("RoomDetection", user_q)},
-                {"from": "gpt", "value": json.dumps(intent_ans, ensure_ascii=False)},
-                {"from": "human", "value": make_review_prompt("RoomDetection", user_q, det_topk)},
-                {"from": "gpt", "value": json.dumps(review_ans, ensure_ascii=False)},
-            ]
-            outjson.append(getsinglejson(sid_str, str(sample_id), pcl_path, conversations, "Agent3d"))
-            sample_id += 1
+        review_ans = {
+            "stage": "review",
+            "summary": "Group objects for each room instance and compute unions to localize every room.",
+            "selected_object_indices": [],
+            "room_groups": room_groups,
+            "next_tool": {"tool": "BBOX_UNION", "args": {"groups": room_groups}},
+        }
+
+        # tool2 union per group -> produce ALL room bboxes
+        union_out = tool_union_groups(det_topk, room_groups)
+        # Build final answer (one per sentence). Keep compact and parse-friendly.
+        final_lines = []
+        for item in union_out:
+            lbl = item.get("room_label", "unknown")
+            bb = item.get("bbox", None)
+            if bb is None:
+                continue
+            final_lines.append(f"{lbl} {bb}")
+        final_text = "\n".join(final_lines) if final_lines else "unknown"
+
+        tool2_text = "Tool=BBOX_UNION\n" + "\n".join([f"{x['room_label']} -> {x['bbox']}" for x in union_out])
+
+        conversations = [
+            {"from": "human", "value": make_intent_prompt(user_q)},
+            {"from": "gpt", "value": json.dumps(intent_ans, ensure_ascii=False)},
+            {"from": "human", "value": make_review_prompt(user_q, det_topk)},
+            {"from": "gpt", "value": json.dumps(review_ans, ensure_ascii=False)},
+            {"from": "human", "value": make_finish_prompt(user_q, tool2_text)},
+            {"from": "gpt", "value": final_text},
+        ]
+        outjson.append(getsinglejson(sid_str, str(sample_id), pcl_path, conversations, "Agent3d"))
+        sample_id += 1
 
         # -----------------------
-        # 4) PositionRelation (1 sample / scene if possible)
+        # 4) PositionRelation (DETECT -> REL_DIR -> FINISH)
         # -----------------------
         uniq_idxs = unique_name_indices(det_topk)
         if len(uniq_idxs) >= 2:
             a_idx, b_idx = random.sample(uniq_idxs, 2)
+
             a_name = (det_topk[a_idx].get("name", "") or det_topk[a_idx].get("label", "") or "").lower()
             b_name = (det_topk[b_idx].get("name", "") or det_topk[b_idx].get("label", "") or "").lower()
             a_norm, b_norm = norm(a_name), norm(b_name)
-            if a_norm and b_norm:
-                qtemp = Q_REL[str(random.randint(0, 29))]
-                user_q = qtemp
-                user_q = re.sub(r"{C1}", a_name, user_q) if "{C1}" in user_q else (user_q + " " + a_name)
-                user_q = re.sub(r"{C2}", b_name, user_q) if "{C2}" in user_q else (user_q + " " + b_name)
 
+            if a_norm and b_norm:
+                # 1) 生成问题：用“模板库里某个问题qid”生成 query（qid 来自几何工具）
+                #    但如果 bbox 缺失 / getdir 返回无效，就退化为随机关系模板(30~269)中的一个
+                bbA = get_bbox(det_topk[a_idx])
+                bbB = get_bbox(det_topk[b_idx])
+
+                if bbA is None or bbB is None:
+                    qid = random.randint(30, 269)
+                    flip = 0
+                else:
+                    rel_out = tool_rel_dir(det_topk, a_idx, b_idx)  # 只调用一次
+                    qid = int(rel_out.get("qid", 0))
+                    flip = int(rel_out.get("flip", 0))
+                    if qid <= 0:
+                        qid = random.randint(30, 269)
+                        flip = 0
+
+                qtemp = Q_REL.get(
+                    str(qid),
+                    Q_REL.get(str(random.randint(30, 269)), "Describe the relation between {C1} and {C2}.")
+                )
+
+                # flip=1：问题里 C1/C2 交换（等价“反正”）
+                if flip == 1:
+                    user_q = qtemp.replace("{C1}", b_name).replace("{C2}", a_name)
+                else:
+                    user_q = qtemp.replace("{C1}", a_name).replace("{C2}", b_name)
+
+                # 2) intent：不泄露 Subtask 字段，只让模型输出结构化工具计划
                 intent_ans = {
                     "stage": "intent",
                     "task": "PositionRelation",
-                    "focus": {"target": "", "A": a_norm, "B": b_norm, "room_type": "", "focus_keywords": []},
-                    "tool_plan": [{"tool": "DETECT", "args": {"topk": 20}}],
+                    "focus": {"target": "", "A": a_norm, "B": b_norm, "focus_keywords": []},
+                    "tool_plan": [
+                        {"tool": "DETECT", "args": {"topk": 20}},
+                        {"tool": "REL_DIR", "args": {}},
+                        {"tool": "FINISH", "args": {}},
+                    ],
                 }
 
+                # 3) review：监督模型选 A/B 两个 index，并触发 REL_DIR
                 review_ans = {
                     "stage": "review",
-                    "summary": f"Select instances for A={a_norm}, B={b_norm}; compute relation using bbox geometry.",
-                    "need_tool2": False,
+                    "summary": "Pick indices for the queried pair, then call REL_DIR.",
                     "selected_object_indices": [int(a_idx), int(b_idx)],
-                    "next_tool": {"tool": "NONE", "args": {}},
+                    "room_groups": [],
+                    "next_tool": {"tool": "REL_DIR", "args": {"A_idx": int(a_idx), "B_idx": int(b_idx)}},
                 }
 
+                # 4) tool2 输出（REL_DIR）：把 qid/flip 给 FINISH
+                tool2_text = (
+                    "Tool=REL_DIR\n"
+                    f"A_idx={a_idx}\n"
+                    f"B_idx={b_idx}\n"
+                    f"qid={qid}\n"
+                    f"flip={flip}\n"
+                )
+
+                # 5) FINISH 的监督答案：直接用 qid 对应“选项句式”，并按 flip 交换 C1/C2 后再替换成具体对象名
+                #    这样模型学到：从 query(可能反向/发散) + 工具证据(qid/flip) 产出正确表述
+                rel_templates = _rel_templates()  # 你实现的缓存读取 A_PositionRelation.json
+                ans_tmpl = rel_templates.get(str(qid), "C1 is related to C2.")
+                if flip == 1:
+                    ans_tmpl = ans_tmpl.replace("C1", "__TMP__").replace("C2", "C1").replace("__TMP__", "C2")
+
+                final_rel_sentence = ans_tmpl.replace("C1", a_name).replace("C2", b_name)
+
                 conversations = [
-                    {"from": "human", "value": make_intent_prompt("PositionRelation", user_q)},
+                    {"from": "human", "value": make_intent_prompt(user_q)},
                     {"from": "gpt", "value": json.dumps(intent_ans, ensure_ascii=False)},
-                    {"from": "human", "value": make_review_prompt("PositionRelation", user_q, det_topk)},
+                    {"from": "human", "value": make_review_prompt(user_q, det_topk)},
                     {"from": "gpt", "value": json.dumps(review_ans, ensure_ascii=False)},
+                    {"from": "human", "value": make_finish_prompt(user_q, tool2_text)},
+                    {"from": "gpt", "value": final_rel_sentence},
                 ]
                 outjson.append(getsinglejson(sid_str, str(sample_id), pcl_path, conversations, "Agent3d"))
                 sample_id += 1
@@ -1852,7 +2081,7 @@ def VG_Train():
 训练Instruction tuning data
 """
 #Classification
-result, outjson = Train_Classification()
+# result, outjson = Train_Classification()
 #Counting
 # result, outjson = Train_Counting()
 # Detection

@@ -682,9 +682,9 @@ if __name__ == "__main__":
     # root_path = 'G:\event\htc/'
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset-name", default="Lamm")#Lamm,Mydata
-    parser.add_argument("--task-name", default="VisualGrounding_plus")#Detection,Counting,Classification,PositionRelation
+    parser.add_argument("--task-name", default="Agent")#Detection,Counting,Classification,PositionRelation
                                                                 # VisualGrounding,RoomDetection,Navigation
-                                                                #VisualGrounding_plus
+                                                                #VisualGrounding_plus; Agent
     parser.add_argument('--answer-file', default=root_path+r"Project/llm/answers")
     parser.add_argument('--base-data-path', default=root_path+r"dataset/Benchmark/Task/Task_Reconstruct/Test")
     # parser.add_argument('--base-data-path', default=root_path+r"htc/MYDATA/BenchMark/Task/Test")
@@ -692,6 +692,52 @@ if __name__ == "__main__":
    
     dataset_name = args.dataset_name
     task_name = args.task_name
+    
+    # [Modify] Agent 模式：依次评估 4 个子任务
+    if task_name == "Agent":
+        subtasks = ["Counting", "VisualGrounding_plus", "RoomDetection", "PositionRelation"]
+        for sub in subtasks:
+            print(f"\n{'='*15} Eval Agent Subtask: {sub} {'='*15}")
+            
+            # 1. 加载对应子任务的数据集
+            try:
+                # LAMM_EVAL_3D 会根据传入的 task_name 加载不同的 json 数据
+                dataset = LAMM_EVAL_3D(args.base_data_path, dataset_name, sub)
+            except Exception as e:
+                print(f"[Skip] Failed to load dataset for {sub}: {e}")
+                continue
+                
+            dataloader = DataLoader(dataset=dataset, batch_size=1, shuffle=False, num_workers=2, drop_last=False,
+                                    collate_fn=collate_fn)
+            dataset = dataloader.dataset
+
+            # 2. 获取评估函数
+            if sub not in dataset2evalfunc:
+                print(f"[Skip] No eval func for {sub}")
+                continue
+            eval_func = dataset2evalfunc[sub]
+
+            # 3. 加载预测结果
+            # 假定文件名为 Agent_{SubTask}.jsonl，位于 args.answer_file 目录下
+            pred_filename = f"Agent_{sub}.jsonl"
+            pred_path = os.path.join(args.answer_file, pred_filename)
+            
+            if not os.path.exists(pred_path):
+                print(f"[Skip] Prediction file not found: {pred_path}")
+                continue
+
+            print(f'Eval [{pred_path}] on {dataset_name} / {sub}')
+            if pred_path.endswith('.jsonl'):
+                pred_data = jsonlines.Reader(open(pred_path, 'rb'))
+            else:
+                pred_data = json.load(open(pred_path, 'rb'))
+
+            # 4. 执行评估
+            eval_func(dataset, pred_data)
+        
+        # 完成所有子任务后退出
+        sys.exit(0)
+
     dataset = LAMM_EVAL_3D(args.base_data_path,
                            dataset_name,
                            task_name

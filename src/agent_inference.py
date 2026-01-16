@@ -17,6 +17,7 @@ src/agent_inference.py
 import os
 import json
 import time
+import copy
 import argparse
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -388,14 +389,8 @@ class Agent3D:
             "{\n"
             "  \"stage\":\"intent\",\n"
             "  \"task\":\"VisualGrounding_plus|Counting|RoomDetection|PositionRelation\",\n"
-            "  \"focus\": {\"target\":\"\", \"A\":\"\", \"B\":\"\", \"room_type\":\"\", \"focus_keywords\":[]},\n"
-            "  \"tool_plan\": [ {\"tool\":\"DETECT\",\"args\":{\"topk\":20}}, {\"tool\":\"COUNT|BBOX_UNION\",\"args\":{}} ]\n"
+            "  \"focus\": {\"target\":\"\", \"A\":\"\", \"B\":\"\"}\n"
             "}\n"
-            "Rules:\n"
-            "- Counting: tool_plan must be [DETECT, COUNT]\n"
-            "- RoomDetection: tool_plan must be [DETECT, BBOX_UNION]\n"
-            "- VisualGrounding_plus: tool_plan must be [DETECT]\n"
-            "- PositionRelation: tool_plan must be [DETECT]\n"
         )
 
         # The training data does not seem to use a controller-specific system message.
@@ -413,9 +408,9 @@ class Agent3D:
                 "A": self._norm(focus.get("A", "")),
                 "B": self._norm(focus.get("B", "")),
                 "room_type": self._norm(focus.get("room_type", "")),
-                "focus_keywords": [self._norm(x) for x in (focus.get("focus_keywords", []) or []) if isinstance(x, str)],
+                "focus_keywords": [],
             },
-            "tool_plan": [{"tool": "DETECT", "args": {"topk": int(self.args.max_obj)}}],
+            "tool_plan": [],
             "raw": raw,
         }
 
