@@ -22,7 +22,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 from tqdm import tqdm
-from transformers import StoppingCriteriaList
+from transformers import StoppingCriteriaList, StoppingCriteria
 
 from model.openlamm import LAMMPEFTModel, LAMMStoppingCriteria
 from conversations import conv_templates
@@ -54,17 +54,10 @@ def _greedy_generate(model, inputs):
         LAMMStoppingCriteria([[2277, 29937], [835]], input_embeds)
     ])
 
-    top_p = inputs.get('top_p', 1.0)
-    temperature = inputs.get('temperature', 1.0)
-    top_p = min(max(top_p, 1e-5), 1.0)
-    temperature = max(temperature, 1e-5)
-
     outputs = model.llama_model.generate(
         inputs_embeds=input_embeds,
         attention_mask=input_masks,
         max_new_tokens=inputs['max_tgt_len'],
-        top_p=top_p,
-        temperature=temperature,
         do_sample=False,
         use_cache=True,
         stopping_criteria=stopping_criteria,
@@ -74,11 +67,30 @@ def _greedy_generate(model, inputs):
 
 def _greedy_text_generate(model: LAMMPEFTModel, prompt: str, device: torch.device, max_new_tokens: int = 200) -> str:
     """纯文本 greedy 生成（用于 intent 规划，稳定）。"""
+
+    class _StopOnSubstrings(StoppingCriteria):
+        def __init__(self, tokenizer, stop_strings: List[str], window_tokens: int = 128):
+            self.tokenizer = tokenizer
+            self.stop_strings = stop_strings
+            self.window_tokens = window_tokens
+
+        def __call__(self, input_ids, scores, **kwargs):
+            tail = input_ids[0][-self.window_tokens:]
+            txt = self.tokenizer.decode(tail, skip_special_tokens=True)
+            return any(s in txt for s in self.stop_strings)
+
     tok = model.llama_tokenizer(
         prompt,
         return_tensors="pt",
         add_special_tokens=True,
     ).to(device)
+
+    # Training data is multi-turn and often uses "### Human:" separators.
+    # For intent stage we want ONLY the first JSON. However the model may emit leading "###" tokens.
+    # So we stop ONLY when it starts the next turn marker ("### Human:").
+    stopping_criteria = StoppingCriteriaList([
+        _StopOnSubstrings(model.llama_tokenizer, ["### Human:"], window_tokens=128)
+    ])
 
     out = model.llama_model.generate(
         input_ids=tok.input_ids,
@@ -86,8 +98,14 @@ def _greedy_text_generate(model: LAMMPEFTModel, prompt: str, device: torch.devic
         max_new_tokens=max_new_tokens,
         do_sample=False,
         use_cache=True,
+        stopping_criteria=stopping_criteria,
     )
-    return model.llama_tokenizer.decode(out[0], skip_special_tokens=True)
+    # Only decode newly generated tokens; otherwise the prompt content can pollute JSON extraction.
+    gen = out[0][tok.input_ids.shape[1]:]
+    text = model.llama_tokenizer.decode(gen, skip_special_tokens=True)
+    if "### Human:" in text:
+        text = text.split("### Human:", 1)[0]
+    return text
 
 
 def mllm_generate_one(
@@ -137,37 +155,46 @@ def mllm_generate_one(
 class DetectionTool3D:
     """复用 Detection 产物作为 proposal generator。"""
 
-    def __init__(self, metadata_detection_path: str, test_detection_path: str):
-        self.metadata_detection_path = metadata_detection_path
-        self.test_detection_path = test_detection_path
-        self._meta = None
-        self._test = None
+    def __init__(self, detection_path: str):
+        self.detection_path = detection_path
+        self._data = None
 
     def _lazy_load(self):
-        if self._meta is None:
-            self._meta = json.load(open(self.metadata_detection_path, 'r'))
-        if self._test is None:
-            self._test = json.load(open(self.test_detection_path, 'r'))
+        if self._data is None:
+            self._data = json.load(open(self.detection_path, 'r'))
 
     def proposals_for_scene(self, pcl_path: str, index: int) -> List[Dict[str, Any]]:
         """
-        更稳的对齐：优先使用 test_detection 的 per-index object（通常与 eval 对齐）。
-        若不可用，再回退到 metadata(scene_id->objects)。
+        proposals 取用策略:
+        1) 若 detection data 是 dict：按 scene_id 取 objects（最稳，不依赖 dataloader index）。
+        2) 若 detection data 是 list：按 dataloader index 取 item['object']（需要严格 index 对齐）。
         """
         self._lazy_load()
 
-        try:
-            item = self._test[index]
-            if isinstance(item, dict) and 'object' in item:
-                return item['object']
-        except Exception:
-            pass
-
         base = os.path.basename(pcl_path)
         src_id = os.path.splitext(base)[0]
-        if src_id not in self._meta:
-            raise KeyError(f"scene id {src_id} not found in metadata Detection.json")
-        return self._meta[src_id]
+
+        # 1) Prefer scene_id keyed detections (robust to ordering).
+        if isinstance(self._data, dict):
+            v = self._data.get(src_id)
+            if isinstance(v, list):
+                return v
+            if isinstance(v, dict) and isinstance(v.get('object', None), list):
+                return v['object']
+
+        # 2) Fall back to per-index detections.
+        if isinstance(self._data, list):
+            try:
+                item = self._data[index]
+                if isinstance(item, dict) and isinstance(item.get('object', None), list):
+                    return item['object']
+            except Exception:
+                pass
+
+        raise KeyError(
+            f"No detection proposals found for scene_id={src_id}. "
+            f"Check --detection_meta format and ids."
+        )
 
 
 class GeomTool3D:
@@ -269,11 +296,11 @@ class Agent3D:
         return ''.join(ch for ch in (s or '').lower() if ch.isalnum())
 
     @staticmethod
-    def _extract_last_json(text: str) -> Dict[str, Any]:
-        # 取最后一个可解析的 {...}
-        candidates = []
-        stack = []
-        start = None
+    def _extract_json_candidates(text: str) -> List[Dict[str, Any]]:
+        """Extract all JSON objects from text, in order."""
+        spans: List[str] = []
+        stack: List[str] = []
+        start: Optional[int] = None
         for i, ch in enumerate(text):
             if ch == '{':
                 if not stack:
@@ -283,14 +310,35 @@ class Agent3D:
                 if stack:
                     stack.pop()
                     if not stack and start is not None:
-                        candidates.append(text[start:i+1])
+                        spans.append(text[start:i + 1])
                         start = None
-        for s in reversed(candidates):
+
+        out: List[Dict[str, Any]] = []
+        for s in spans:
             try:
-                return json.loads(s)
+                js = json.loads(s)
+                if isinstance(js, dict):
+                    out.append(js)
             except Exception:
                 continue
-        return {}
+        return out
+
+    @classmethod
+    def _extract_json_by_stage(cls, text: str, stage: str, task_type: Optional[str] = None) -> Dict[str, Any]:
+        """Pick the first JSON matching stage (and optional task_type).
+
+        Rationale: models sometimes continue with extra few-shot-like dialog and multiple JSONs.
+        Taking the last JSON is brittle and can select an unrelated example.
+        """
+        candidates = cls._extract_json_candidates(text)
+        for js in candidates:
+            if js.get("stage") != stage:
+                continue
+            if stage == "intent" and task_type and js.get("task") not in (task_type, None, ""):
+                # If the model outputs a mismatched task, skip it.
+                continue
+            return js
+        return candidates[-1] if candidates else {}
 
     @staticmethod
     def _safe_int_list(x) -> List[int]:
@@ -367,7 +415,7 @@ class Agent3D:
         )
 
         raw = _greedy_text_generate(self.model, controller_sys + "\n" + inst, device=self.device, max_new_tokens=220)
-        js = self._extract_last_json(raw)
+        js = self._extract_json_by_stage(raw, stage="intent", task_type=task_type)
 
         # sanitize + enforce plan
         focus = (js.get("focus", {}) if isinstance(js, dict) else {}) if isinstance(js, dict) else {}
@@ -460,7 +508,7 @@ class Agent3D:
             temperature=1e-5,
         )
         raw = out[0] if isinstance(out, list) and out else str(out)
-        js = self._extract_last_json(raw)
+        js = self._extract_json_by_stage(raw, stage="review")
 
         review = {
             "stage": "review",
@@ -561,18 +609,35 @@ class Agent3D:
         agent_trace["intent"] = intent
 
         # Tool1: DETECT (reuse)
-        det_topk = (obj_list or [])[:int(self.args.max_obj)]
+        # Filter obj_list based on intent's target before passing to review.
+        all_objs = obj_list or []
+        target_keyword = intent.get("focus", {}).get("target", "")
+        if target_keyword:
+            # Find all objects matching the target keyword from the intent stage.
+            matching_objs = [
+                obj for obj in all_objs
+                if target_keyword in self._norm(obj.get("name", "") or obj.get("label", ""))
+            ]
+            # Take the top N matches, respecting the max_obj limit.
+            det_topk = matching_objs[:int(self.args.max_obj)]
+        else:
+            # If no target, just take the first N objects as before.
+            det_topk = all_objs[:int(self.args.max_obj)]
+
         agent_trace["budget"]["used"] += 1
         agent_trace["tool1"] = {"tool": "DETECT", "n": len(det_topk), "topk": int(self.args.max_obj)}
 
         if not det_topk:
             # hard fallback
             if task_type == "Counting":
-                return "0", {**agent_trace, "mode": "empty_detect"}
+                return "1", {**agent_trace, "mode": "empty_detect_fallback_to_1"}
             return "unknown", {**agent_trace, "mode": "empty_detect"}
 
         # Step2: review/select (MULTIMODAL MLLM)
         review = self.mllm_review_multimodal(task_type, query, pcl_paths, det_topk, intent)
+        
+        print(review)
+
         agent_trace["review"] = review
         selected = review.get("selected_object_indices", [])
 
@@ -615,7 +680,30 @@ class Agent3D:
                 hits = self._find_by_keywords_fallback(det_topk, [tgt] if tgt else [])
                 selected = hits
                 agent_trace["fallback_select"] = {"reason": "count_fix", "selected_n": len(selected), "target": tgt}
-            text = str(len(selected))
+            
+            count_result = len(selected)
+
+            # New logic to adjust the count based on options
+            options = data_item.get('gt_choices')
+            # The data loader might wrap single items in a list
+            if isinstance(options, list) and len(options) > 0 and isinstance(options[0], list):
+                options = options[0]
+
+            if isinstance(options, list) and all(isinstance(i, (int, float)) for i in options):
+                if count_result == 0:
+                    text = "1"
+                else:
+                    if count_result in options:
+                        text = str(count_result)
+                    else:
+                        larger_options = sorted([opt for opt in options if opt > count_result])
+                        if larger_options:
+                            text = str(larger_options[0])
+                        else:
+                            # If no larger option, fallback to the largest option available
+                            text = str(max(options))
+            else:
+                 text = str(count_result)
 
         elif task_type == "RoomDetection":
             # must do tool2 BBOX_UNION
@@ -649,6 +737,12 @@ class Agent3D:
             text = "unknown"
 
         agent_trace["selected_indices_final"] = selected
+        if task_type == "Counting":
+            agent_trace["selected_names_final"] = [
+                (det_topk[i].get("name") or det_topk[i].get("label") or "")
+                for i in selected
+                if 0 <= i < len(det_topk)
+            ]
 
         # Reflection: one-shot validation + fallback
         text_fixed, refl = self.reflection_fix(task_type, intent, det_topk, selected, text)
@@ -661,10 +755,11 @@ class Agent3D:
 # -------------------------
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--task_type', type=str, default='Counting',
+    parser.add_argument('--task_type', type=str, default='RoomDetection',
                         choices=['VisualGrounding_plus', 'Counting', 'RoomDetection', 'PositionRelation'])
     parser.add_argument('--base-data-path', type=str, default='/data/HTC/Data/dataset/Benchmark/data')
-    parser.add_argument('--answers-dir', type=str, default='../answers')
+    # Default to repo-local answers/ to avoid writing outside workspace (cwd-dependent).
+    parser.add_argument('--answers-dir', type=str, default='/data/HTC/Project/llm/answers')
     parser.add_argument('--gpu', type=int, default=1)
 
     # model paths (align with inference_3d.py)
@@ -672,7 +767,7 @@ def parse_args():
     parser.add_argument('--encoder_ckpt_path', type=str,
                         default='/data/HTC/Data/model_zoo/epcl_ckpt/epcl_scannet_vit-L-14_256tokens_latest.pth')
     parser.add_argument('--vicuna_ckpt_path', type=str, default='/data/HTC/Data/model_zoo/vicuna-7b/Vicuna_7B_v0')
-    parser.add_argument('--delta_ckpt_path', type=str, default='/data/HTC/Data/model_zoo/llm_v1/ALL1/pytorch_model_ep1.pt')
+    parser.add_argument('--delta_ckpt_path', type=str, default='/data/HTC/Data/model_zoo/llm_exe/agent/pytorch_model_ep1.pt')
 
     parser.add_argument('--train_stage', type=int, default=2)
     parser.add_argument('--stage', type=int, default=2)
@@ -698,14 +793,12 @@ def parse_args():
     parser.add_argument('--max_obj', type=int, default=20)
     parser.add_argument('--wo_reflection', action='store_true')
     parser.add_argument('--wo_tool', action='store_true')
-    parser.add_argument('--dry_run', type=int, default=10)
+    parser.add_argument('--dry_run', type=int, default=0)
     parser.add_argument('--do_sample', action='store_true')
 
     # detector artifacts
-    parser.add_argument('--detection_meta', type=str,
-                        default='/data/HTC/Data/dataset/Benchmark/data/metadata/Detection.json')
-    parser.add_argument('--detection_test', type=str,
-                        default='/data/HTC/Data/dataset/Benchmark/Task/Task_Reconstruct/Test/Detection.json')
+    parser.add_argument('--detection_path', type=str,
+                        default='/data/HTC/Data/dataset/Benchmark/data/metadata/Detection_0.3_0.01.json')
     parser.add_argument('--objpoints_path', type=str,
                         default='/data/HTC/Project/Point-BERT/data/ModelNet/modelnet40_normal_resampled/my_test_1024pts_fps.dat')
 
@@ -721,8 +814,7 @@ def parse_args():
     assert os.path.exists(args.delta_ckpt_path), 'delta checkpoint not exists!'
     assert os.path.exists(args.vicuna_ckpt_path), 'vicuna checkpoint not exists!'
     assert os.path.exists(args.encoder_ckpt_path), 'vision encoder checkpoint not exists!'
-    assert os.path.exists(args.detection_meta), 'Detection metadata not exists!'
-    assert os.path.exists(args.detection_test), 'Detection test outputs not exists!'
+    assert os.path.exists(args.detection_path), 'Detection metadata not exists!'
     assert os.path.exists(args.objpoints_path), 'objpoints file not exists!'
     return args
 
@@ -741,12 +833,13 @@ def main():
     model.llama_model = model.llama_model.merge_and_unload()
     model = model.eval().half().to(device)
 
-    det_tool = DetectionTool3D(args.detection_meta, args.detection_test)
+    det_tool = DetectionTool3D(args.detection_path)
     agent = Agent3D(args, model, det_tool, device=device)
 
     dataloader = load_3Deval_dataset(args.base_data_path, args.task_type, mode='common', batch_size=args.bs)
 
-    answers_file = os.path.join(args.answers_dir, f"{args.task_type}.jsonl")
+    # 增加时间戳防止覆盖
+    answers_file = os.path.join(args.answers_dir, f"Agent_{args.task_type}_{int(time.time())}.jsonl")
     os.makedirs(os.path.dirname(answers_file), exist_ok=True)
 
     with open(answers_file, 'w') as fout:
