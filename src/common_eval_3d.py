@@ -426,7 +426,7 @@ def VG_plus_acc(dataset,pred_data):
     import re
     score = 0.0
     testnum = 0
-    pred_bbox = json.load(open("/media/kou/Data1/htc/LAMM/data/metadata/Detection.json"))
+    pred_bbox = json.load(open("/data/HTC/Data/dataset/Benchmark/data/metadata/Detection.json"))
     for gt, pred in tqdm(zip(dataset, pred_data)):
         tmp_score = 0
         #gt_choice = gt['obj_num']   #误区,detection的num不是metadata的num
@@ -682,7 +682,7 @@ if __name__ == "__main__":
     # root_path = 'G:\event\htc/'
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset-name", default="Lamm")#Lamm,Mydata
-    parser.add_argument("--task-name", default="Counting")#Detection,Counting,Classification,PositionRelation
+    parser.add_argument("--task-name", default="VisualGrounding_plus")#Detection,Counting,Classification,PositionRelation
                                                                 # VisualGrounding,RoomDetection,Navigation
                                                                 #VisualGrounding_plus
     parser.add_argument('--answer-file', default=root_path+r"Project/llm/answers")
@@ -716,7 +716,7 @@ if __name__ == "__main__":
         jonal = r'/media/kou/Data1/htc/LAMM_v1/answers/Navigation_Finetune_600/Navigation_Mydata.jsonl'
         pred_data = jsonlines.Reader(open(jonal))
     elif task_name == 'VisualGrounding_plus':#PositionRelation
-        jonal = r'/media/kou/Data1/htc/LAMM_v1/answers/VG_Finetune_600/Navigation_Mydata.jsonl'
+        jonal = r'/data/HTC/Project/llm/answers/Agent_VisualGrounding_plus.jsonl'
         pred_data = jsonlines.Reader(open(jonal))
     elif task_name == 'Classification' or 1:
         file_ext = '.jsonl'

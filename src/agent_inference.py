@@ -279,8 +279,6 @@ class Agent3D:
         "kitchen": ["fridge", "stove", "sink", "cabinet"],
         "livingroom": ["sofa", "tv", "door", "coffeetable"],
         "bathroom": ["toilet", "sink", "door", "shower"],
-        "diningroom": ["table", "chair", "cabinet"],
-        "office": ["desk", "chair", "door", "bookshelf"],
     }
 
     def __init__(self, args, model: LAMMPEFTModel, det_tool: DetectionTool3D, device: torch.device,
@@ -380,41 +378,29 @@ class Agent3D:
         输出 tool_plan（1/2步）+ focus（target/A/B/room_type/keywords）
         注意：这里用纯文本 greedy，主要为了 JSON 稳定；论文重点在 Stage2 多模态选择。
         """
-        must_plan = {
-            "Counting": "DETECT then COUNT",
-            "RoomDetection": "DETECT then BBOX_UNION",
-            "PositionRelation": "DETECT only",
-            "VisualGrounding_plus": "DETECT only",
-        }[task_type]
-
-        controller_sys = (
-            "You are a multimodal MLLM-controller that plans tool calls.\n"
-            "Do NOT answer the task. Only output ONE JSON.\n"
-            "Allowed tools: DETECT, COUNT, BBOX_UNION.\n"
-            f"Relation label space: {self.REL_SPACE}\n"
-            f"Room label space: {self.ROOM_SPACE}\n"
-        )
+        # Reconstruct the prompt to match the training data format.
         inst = (
-            f"TaskType={task_type}\n"
-            f"Your plan MUST be: {must_plan}\n"
-            "Output JSON schema:\n"
+            f"[AGENT_INTENT]\n"
+            f"Subtask={task_type}\n"
+            f"UserQuestion: {query}\n\n"
+            "You are an MLLM agent controller. Output ONE JSON only.\n"
+            "Schema:\n"
             "{\n"
             "  \"stage\":\"intent\",\n"
             "  \"task\":\"VisualGrounding_plus|Counting|RoomDetection|PositionRelation\",\n"
-            "  \"focus\":{\n"
-            "     \"target\":\"\", \"A\":\"\", \"B\":\"\", \"room_type\":\"\", \"focus_keywords\":[]\n"
-            "  },\n"
-            "  \"tool_plan\":[{\"tool\":\"DETECT\",\"args\":{\"topk\":20}}]\n"
+            "  \"focus\": {\"target\":\"\", \"A\":\"\", \"B\":\"\", \"room_type\":\"\", \"focus_keywords\":[]},\n"
+            "  \"tool_plan\": [ {\"tool\":\"DETECT\",\"args\":{\"topk\":20}}, {\"tool\":\"COUNT|BBOX_UNION\",\"args\":{}} ]\n"
             "}\n"
             "Rules:\n"
-            "- Counting: fill focus.target; tool_plan=[DETECT, COUNT]\n"
-            "- VisualGrounding_plus: fill focus.target; tool_plan=[DETECT]\n"
-            "- PositionRelation: fill focus.A, focus.B; tool_plan=[DETECT]\n"
-            "- RoomDetection: fill focus.room_type and focus_keywords (e.g., bedroom->['bed','door']); tool_plan=[DETECT, BBOX_UNION]\n"
-            f"Question: {query}\n"
+            "- Counting: tool_plan must be [DETECT, COUNT]\n"
+            "- RoomDetection: tool_plan must be [DETECT, BBOX_UNION]\n"
+            "- VisualGrounding_plus: tool_plan must be [DETECT]\n"
+            "- PositionRelation: tool_plan must be [DETECT]\n"
         )
 
-        raw = _greedy_text_generate(self.model, controller_sys + "\n" + inst, device=self.device, max_new_tokens=220)
+        # The training data does not seem to use a controller-specific system message.
+        # We pass the full instruction as the prompt.
+        raw = _greedy_text_generate(self.model, inst, device=self.device, max_new_tokens=220)
         js = self._extract_json_by_stage(raw, stage="intent", task_type=task_type)
 
         # sanitize + enforce plan
@@ -457,58 +443,63 @@ class Agent3D:
         - need_tool2（Count/Room 必须 true；VG/REL 默认 false）
         - selected_object_indices（VG:1个；REL:2个；Room:2~8个；Count:任意个）
         """
-        controller_sys = (
-            "You are a multimodal MLLM-controller.\n"
-            "You can see the 3D point cloud and each object proposal (in the same order as the index list).\n"
-            "Object 'name' may be noisy; use geometry/shape from the 3D observation when needed.\n"
-            "Only output ONE JSON object. No extra text.\n"
-        )
+        # Format detected objects similar to training data.
+        obj_lines = []
+        for i, o in enumerate(det_topk[:self.args.max_obj]):
+            name = o.get("name", "") or o.get("label", "") or ""
+            bbox = o.get("BoundingBox", None)
+            obj_lines.append(f"(obj{i}):{name} bbox={bbox}")
+        obj_text = "\n".join(obj_lines)
 
-        # 给一点“索引锚点”，但强调名字不可靠
-        cand_text = self._format_candidates_brief(det_topk)
-
-        # 强约束输出 JSON，避免跑偏
-        rules = (
+        # Reconstruct the prompt to match the training data format.
+        prompt = (
+            f"[TOOL_RESULT]\n"
+            f"Tool=DETECT\n"
+            f"Objects(topk={len(det_topk)}):\n{obj_text}\n\n"
+            f"[AGENT_REVIEW]\n"
+            f"Subtask={task_type}\n"
+            f"UserQuestion: {query}\n\n"
+            "Output ONE JSON only.\n"
             "Schema:\n"
             "{\n"
             "  \"stage\":\"review\",\n"
             "  \"summary\":\"one short sentence\",\n"
             "  \"need_tool2\": true/false,\n"
-            "  \"selected_object_indices\": [int, ...]\n"
+            "  \"selected_object_indices\": [int, ...],\n"
+            "  \"next_tool\": {\"tool\":\"NONE|COUNT|BBOX_UNION\", \"args\": {}}\n"
             "}\n"
-            "Rules by task:\n"
-            "- VisualGrounding_plus: select EXACTLY 1 index.\n"
-            "- PositionRelation: select EXACTLY 2 indices: [A_index, B_index].\n"
-            "- Counting: select all indices that are the target; need_tool2 must be true.\n"
-            "- RoomDetection: select 2~8 indices that define the room extent (e.g., bedroom: bed+door); need_tool2 must be true.\n"
-        )
-
-        focus = intent.get("focus", {})
-        prompt = (
-            f"{rules}\n"
-            f"TaskType={task_type}\n"
-            f"Focus={json.dumps(focus, ensure_ascii=False)}\n"
-            f"Question={query}\n"
-            "Index list (for reference, names may be noisy):\n"
-            f"{cand_text}\n"
+            "Rules:\n"
+            "- VisualGrounding_plus: select EXACTLY 1 index; need_tool2=false; next_tool.tool=\"NONE\".\n"
+            "- PositionRelation: select EXACTLY 2 indices [A_idx,B_idx]; need_tool2=false; next_tool.tool=\"NONE\".\n"
+            "- Counting: select indices that match target; need_tool2=true; next_tool.tool=\"COUNT\".\n"
+            "- RoomDetection: select 2~8 indices that define the room extent; need_tool2=true; next_tool.tool=\"BBOX_UNION\".\n"
         )
 
         # 关键：这里调用多模态生成，传入 pcl_paths + obj_list=det_topk
+        # IMPORTANT: sys_msg=" " (space) to overwrite default system prompt with empty-like string.
+        # sys_msg="" (empty) would cause the underlying logic to reuse the default or previous system prompt.
         out = mllm_generate_one(
             self.args,
             self.model,
             prompt_list=[prompt],
-            sys_msg=controller_sys,            # 用 controller system，不用 dataset sys_msg，保证 JSON 行为一致
+            sys_msg=" ",
             pcl_paths=pcl_paths,
             obj_list=det_topk,
             list_of_objpoints=[],              # scene tasks 默认空即可（与 inference_3d 一致）
             task_type=task_type,
-            max_length=280,
+            max_length=200,   # 减少续写 Schema 的概率
             top_p=1.0,
             temperature=1e-5,
         )
         raw = out[0] if isinstance(out, list) and out else str(out)
-        js = self._extract_json_by_stage(raw, stage="review")
+        raw_clean = raw.split("###", 1)[0]  # 截断可能的下一轮对话/续写
+        js = self._extract_json_by_stage(raw_clean, stage="review")
+        # 容错：兼容模型误写的字段名
+        if isinstance(js, dict):
+            if "need_tool" in js and "need_tool2" not in js:
+                js["need_tool2"] = js.pop("need_tool")
+            if "need_object_indices" in js and "selected_object_indices" not in js:
+                js["selected_object_indices"] = js.pop("need_object_indices")
 
         review = {
             "stage": "review",
@@ -608,20 +599,40 @@ class Agent3D:
         intent = self.mllm_intent(task_type, query)
         agent_trace["intent"] = intent
 
+        print(intent)
+
         # Tool1: DETECT (reuse)
-        # Filter obj_list based on intent's target before passing to review.
         all_objs = obj_list or []
-        target_keyword = intent.get("focus", {}).get("target", "")
-        if target_keyword:
-            # Find all objects matching the target keyword from the intent stage.
-            matching_objs = [
-                obj for obj in all_objs
-                if target_keyword in self._norm(obj.get("name", "") or obj.get("label", ""))
-            ]
-            # Take the top N matches, respecting the max_obj limit.
-            det_topk = matching_objs[:int(self.args.max_obj)]
+
+        # Strategy:
+        # - Counting/Room: prioritize RECALL (filter by keyword).
+        # - VG/Relation: prioritize CONTEXT/ORDER (natural top-k).
+        if task_type in ["Counting", "RoomDetection"]:
+            keywords = []
+            focus = intent.get("focus", {})
+            if focus.get("target"):
+                keywords.append(focus["target"])
+            if task_type == "RoomDetection":
+                rt = focus.get("room_type", "")
+                keywords.extend(self.ROOM_HINTS.get(rt, []) or [])
+                keywords.extend(focus.get("focus_keywords", []) or [])
+
+            # Simple keyword matching to find all potential targets
+            candidates = []
+            for obj in all_objs:
+                name = self._norm(obj.get("name", "") or obj.get("label", "") or "")
+                for k in keywords:
+                    k_norm = self._norm(str(k))
+                    if k_norm and k_norm in name:
+                        candidates.append(obj)
+                        break
+            
+            if candidates:
+                det_topk = candidates[:int(self.args.max_obj)]
+            else:
+                det_topk = all_objs[:int(self.args.max_obj)]
         else:
-            # If no target, just take the first N objects as before.
+            # VisualGrounding_plus / PositionRelation
             det_topk = all_objs[:int(self.args.max_obj)]
 
         agent_trace["budget"]["used"] += 1
@@ -826,9 +837,12 @@ def main():
     if device.type == 'cuda':
         # FIX: set_device expects int/str, not torch.device
         torch.cuda.set_device(args.gpu)
+        # Pre-warm CUDA to avoid initialization overhead during model loading
+        torch.randn(1, device=device)
 
     model = LAMMPEFTModel(**args.__dict__)
-    delta_ckpt = torch.load(args.delta_ckpt_path, map_location=torch.device('cpu'))
+    # Use mmap=True for potentially faster loading
+    delta_ckpt = torch.load(args.delta_ckpt_path, map_location='cpu', mmap=True)
     model.load_state_dict(delta_ckpt, strict=False)
     model.llama_model = model.llama_model.merge_and_unload()
     model = model.eval().half().to(device)
@@ -839,7 +853,7 @@ def main():
     dataloader = load_3Deval_dataset(args.base_data_path, args.task_type, mode='common', batch_size=args.bs)
 
     # 增加时间戳防止覆盖
-    answers_file = os.path.join(args.answers_dir, f"Agent_{args.task_type}_{int(time.time())}.jsonl")
+    answers_file = os.path.join(args.answers_dir, f"Agent_{args.task_type}.jsonl")
     os.makedirs(os.path.dirname(answers_file), exist_ok=True)
 
     with open(answers_file, 'w') as fout:
