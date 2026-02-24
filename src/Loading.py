@@ -39,6 +39,8 @@ class LAMM_EVAL_3D(Dataset):
             json_path = "/data/HTC/Data/dataset/Benchmark/Task/Task_Reconstruct/Test/Counting.json"
         elif self.task_name=='VisualGrounding_plus':
             json_path = "/data/HTC/Data/dataset/Benchmark/Task/Task_Reconstruct/Test/VisualGrounding_plus.json"
+        elif self.task_name=='RoomDetection':
+            json_path = "/data/HTC/Data/dataset/Benchmark/Task/Task_Reconstruct/Test/RoomDetection.json"
         else:
             json_path = "/data/HTC/Data/dataset/Benchmark/data/meta_file/VG_ScanRefer.json"
         self.data = json.load(open(json_path, 'rb'))

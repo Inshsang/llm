@@ -1512,7 +1512,7 @@ def Train_Agent():
         for i, o in enumerate(det_topk):
             name = (o.get("name", "") or o.get("label", "") or "").lower()
             bbox = o.get("BoundingBox", None)
-            lines.append(f"(obj{i}):{name} bbox={bbox}")
+            lines.append(f"{name}{bbox}")
         return "\n".join(lines)
 
     def find_indices_by_keywords(det_list: List[Dict[str, Any]], keywords: List[str]) -> List[int]:
@@ -1584,13 +1584,13 @@ def Train_Agent():
         return (
             "[AGENT_INTENT]\n"
             f"UserQuestion: {user_question}\n\n"
-            "You are an MLLM agent controller. Output ONE JSON only.\n"
-            "Schema:\n"
-            "{\n"
-            "  \"stage\":\"intent\",\n"
-            "  \"task\":\"VisualGrounding_plus|Counting|RoomDetection|PositionRelation\",\n"
-            "  \"focus\": {\"target\":\"\", \"A\":\"\", \"B\":\"\"}\n"
-            "}\n"
+            # "You are an MLLM agent controller. Output ONE JSON only.\n"
+            # "Schema:\n"
+            # "{\n"
+            # "  \"stage\":\"intent\",\n"
+            # "  \"task\":\"VisualGrounding_plus|Counting|RoomDetection|PositionRelation\",\n"
+            # "  \"focus\": {\"target\":\"\", \"A\":\"\", \"B\":\"\"}\n"
+            # "}\n"
         )
 
     def make_review_prompt(user_question: str, det_topk: List[Dict[str, Any]]) -> str:
@@ -1602,19 +1602,6 @@ def Train_Agent():
             "[AGENT_REVIEW]\n"
             f"UserQuestion: {user_question}\n\n"
             "Output ONE JSON only.\n"
-            "Schema:\n"
-            "{\n"
-            "  \"stage\":\"review\",\n"
-            "  \"summary\":\"one short sentence\",\n"
-            "  \"selected_object_indices\": [int, ...],\n"
-            "  \"room_groups\": [ {\"room_label\":\"bedroom|kitchen|livingroom|bathroom\", \"indices\":[int,...]} ],\n"
-            "  \"next_tool\": {\"tool\":\"FINISH|COUNT|BBOX_UNION|REL_DIR\", \"args\": {}}\n"
-            "}\n"
-            "Rules:\n"
-            "- VisualGrounding_plus: selected_object_indices must have EXACTLY 1 index; next_tool.tool=\"FINISH\".\n"
-            "- Counting: selected_object_indices are for explanation (from top-20); next_tool.tool=\"COUNT\".\n"
-            "- PositionRelation: selected_object_indices must have EXACTLY 2 indices [A_idx,B_idx]; next_tool.tool=\"REL_DIR\".\n"
-            "- RoomDetection: fill room_groups with 1~N groups; each group indices size in [2,8]; next_tool.tool=\"BBOX_UNION\".\n"
         )
 
     def make_finish_prompt(user_question: str, tool2_result_text: str) -> str:
@@ -1631,10 +1618,6 @@ def Train_Agent():
             f"{simplified_result}\n\n"
             "[AGENT_FINISH]\n"
             f"UserQuestion: {user_question}\n\n"
-            "Output the FINAL answer only (no JSON).\n"
-            "For Counting: output a single integer (already matched to choices).\n"
-            "For PositionRelation: output the final option / statement consistent with the question.\n"
-            "For RoomDetection: output all room_label + bbox, one room per sentence.\n"
         )
 
     # ---------- tool simulators (for building supervised conversations) ----------
@@ -1720,7 +1703,7 @@ def Train_Agent():
     # ---------- Generate samples ----------
     sample_id = 0
 
-    for sid in range(0, 460):
+    for sid in range(0, 460):   #460
         sid_str = str(sid)
         pcl_path = "scene/" + sid_str + ".npy"
 
@@ -1794,20 +1777,42 @@ def Train_Agent():
                 # tool COUNT uses ALL objs
                 count_all = tool_count_all(all_objs, obj_norm)
 
-                # upward rounding to choices (if you have choices in GTc; otherwise keep raw)
-                # NOTE: keep this logic minimal + safe
-                choices = None
-                try:
-                    # if your GT file provides choices per sample, plug it here
-                    # e.g., GTc[sid] might be dict with "choices"
-                    if isinstance(GTc, dict) and sid_str in GTc and isinstance(GTc[sid_str], dict):
-                        choices = GTc[sid_str].get("choices", None)
-                except Exception:
-                    choices = None
-
                 final_count = int(count_all)
-                if isinstance(choices, list) and choices:
-                    final_count = ceil_to_choices(final_count, choices)
+
+                # Generate options similar to PositionRelation
+                option_labels = ["(A)", "(B)", "(C)", "(D)"]
+                
+                # Logic from get_testCounting but adapted for 4 options and dynamic range
+                # get_testCounting uses range(1, 10) for small counts.
+                # Here we try to generate distractors around the final_count or within reasonable range.
+                
+                distractors = []
+                pool = list(range(1, 10)) # Default small objects pool
+                if final_count >= 10:
+                    pool = list(range(max(1, final_count - 5), final_count + 6))
+                
+                if final_count in pool:
+                    pool.remove(final_count)
+                
+                if len(pool) >= 3:
+                     distractors = random.sample(pool, 3)
+                else:
+                     # Fallback if pool is too small (e.g. count is 1, pool is 2..9? no, verify logic)
+                     # If count=1, pool=2..9. If count=100, pool=95..106 remove 100.
+                     while len(distractors) < 3:
+                        d = random.randint(1, 10)
+                        if d != final_count and d not in distractors:
+                            distractors.append(d)
+                
+                options = [str(x) for x in distractors]
+                # Insert correct answer at random position
+                answer_pos = random.randint(0, 3)
+                options.insert(answer_pos, str(final_count))
+                
+                # Append options to user_q
+                user_q += "\nOptions:"
+                for i, opt in enumerate(options):
+                    user_q += f"\n{option_labels[i]} {opt}"
 
                 intent_ans = {
                     "stage": "intent",
@@ -1881,13 +1886,14 @@ def Train_Agent():
         final_lines = []
         for item in union_out:
             lbl = item.get("room_label", "unknown")
-            bb = item.get("bbox", None)
+            bbox = item.get("bbox", None)
+            bb = [round(x, 2) for x in bbox] if bb is not None else None
             if bb is None:
                 continue
             final_lines.append(f"{lbl} {bb}")
         final_text = "\n".join(final_lines) if final_lines else "unknown"
 
-        tool2_text = "Tool=BBOX_UNION\n" + "\n".join([f"{x['room_label']} -> {x['bbox']}" for x in union_out])
+        tool2_text = "Tool=BBOX_UNION\n" + "\n".join([f"{x['room_label']}{x['bbox']}" for x in union_out])
 
         conversations = [
             {"from": "human", "value": make_intent_prompt(user_q)},
@@ -1935,9 +1941,44 @@ def Train_Agent():
 
                 # flip=1：问题里 C1/C2 交换（等价“反正”）
                 if flip == 1:
-                    user_q = qtemp.replace("{C1}", b_name).replace("{C2}", a_name)
+                    user_q_base = qtemp.replace("{C1}", b_name).replace("{C2}", a_name)
+                    # Prepare answer template swap
+                    ans_tmpl = _rel_templates().get(str(qid), "C1 is related to C2.")
+                    ans_tmpl = ans_tmpl.replace("C1", "__TMP__").replace("C2", "C1").replace("__TMP__", "C2")
+                    correct_ans_text = ans_tmpl.replace("C1", a_name).replace("C2", b_name)
                 else:
-                    user_q = qtemp.replace("{C1}", a_name).replace("{C2}", b_name)
+                    user_q_base = qtemp.replace("{C1}", a_name).replace("{C2}", b_name)
+                    ans_tmpl = _rel_templates().get(str(qid), "C1 is related to C2.")
+                    correct_ans_text = ans_tmpl.replace("C1", a_name).replace("C2", b_name)
+
+                # Generate 3 distractors
+                # Strategy: pick 3 other random relation IDs, check they are not same as `qid`
+                # Only use valid keys from _rel_templates which are typically 1-28 or 30-269
+                all_rel_keys = list(_rel_templates().keys())
+                distractors = []
+                while len(distractors) < 3:
+                    rq = random.choice(all_rel_keys)
+                    if rq == str(qid): continue # skip correct
+                    # construct text
+                    d_tmpl = _rel_templates()[rq]
+                    # random flip for distractor
+                    if random.random() > 0.5:
+                        d_text = d_tmpl.replace("C1", b_name).replace("C2", a_name) # Logic maybe wrong but it's a distractor
+                    else:
+                        d_text = d_tmpl.replace("C1", a_name).replace("C2", b_name)
+                    if d_text not in distractors and d_text != correct_ans_text:
+                        distractors.append(d_text)
+                
+                # Assemble Options
+                options = distractors + [correct_ans_text]
+                random.shuffle(options)
+                correct_idx = options.index(correct_ans_text)
+                option_labels = ["(A)", "(B)", "(C)", "(D)"]
+                
+                # Construct final user query with options
+                user_q = user_q_base + "\nOptions:"
+                for i, opt in enumerate(options):
+                    user_q += f"\n{option_labels[i]} {opt}"
 
                 # 2) intent：不泄露 Subtask 字段，只让模型输出结构化工具计划
                 intent_ans = {
@@ -1969,14 +2010,12 @@ def Train_Agent():
                     f"flip={flip}\n"
                 )
 
-                # 5) FINISH 的监督答案：直接用 qid 对应“选项句式”，并按 flip 交换 C1/C2 后再替换成具体对象名
-                #    这样模型学到：从 query(可能反向/发散) + 工具证据(qid/flip) 产出正确表述
-                rel_templates = _rel_templates()  # 你实现的缓存读取 A_PositionRelation.json
-                ans_tmpl = rel_templates.get(str(qid), "C1 is related to C2.")
-                if flip == 1:
-                    ans_tmpl = ans_tmpl.replace("C1", "__TMP__").replace("C2", "C1").replace("__TMP__", "C2")
-
-                final_rel_sentence = ans_tmpl.replace("C1", a_name).replace("C2", b_name)
+                # 5) FINISH 的监督答案：输出完整句子（或者也可以带上选项 A/B/C/D，视训练目标而定）
+                # 这里保持输出自然语言句子，这通常是 CoT 的最后一步。或者可以改成 "The answer is (X). Correct Sentence."
+                # 既然是 Agent 任务，通常直接回答事实即可。
+                # 但如果在 intent/review 输入了选项，最好的回答是直接给出正确选项的内容。
+                
+                final_rel_sentence = correct_ans_text
 
                 conversations = [
                     {"from": "human", "value": make_intent_prompt(user_q)},
@@ -2120,7 +2159,7 @@ result, outjson = Train_Agent()
 # result, outjson = Test_Navigation()
 #PositionRelation
 # result, outjson = Test_PositionRelation()
-result = "/data/HTC/Data/dataset/Benchmark/temp.json"
+result = "/data/HTC/Data/dataset/Benchmark/Agent_v1_demo.json"
 with open(result, 'w') as f:
     # 把列表写入到文件里，转换成json格式
     json.dump(outjson, f, indent=4)

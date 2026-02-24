@@ -2,30 +2,23 @@
 src/agent_inference.py
 
 3D Agent 推理脚本（对齐 `src/inference_3d.py` 数据流）。
-
-目标：补齐 Agent 缺失的 3D 任务（VG fine/plus、Counting、RoomDetection、PositionRelation），并且体现
-“把 MLLM 扩展成 Agent”：MLLM（多模态）作为 controller，基于点云 + proposals 产生结构化工具调用与关注对象选择。
-
-约束：
-- 固定预算：每样本最多 2 次工具（Tool1=DETECT，Tool2=COUNT/BBOX_UNION；REL/VG 通常只 Tool1）
-- 一次反思：只做验收与回退，不做额外推理
-- 不引入外部 detector：复用 Detection.json 的 proposals
-
-输出：jsonl，每条包含 id/pcl/text（兼容 eval）+ agent_trace（可用于论文展示 agent 过程）。
 """
 
-import os
-import json
-import time
-import copy
 import argparse
+import json
+import os
+import time
 from typing import Any, Dict, List, Optional, Tuple
 
 import torch
+import numpy as np
+from torch.nn.utils import rnn
 from tqdm import tqdm
-from transformers import StoppingCriteriaList, StoppingCriteria
+from transformers import AutoModelForCausalLM, AutoTokenizer, StoppingCriteria, StoppingCriteriaList
 
 from model.openlamm import LAMMPEFTModel, LAMMStoppingCriteria
+from model.openlamm import make_prompt_start
+from model.openlamm import VISION_TAGS
 from conversations import conv_templates
 from datasets import load_3Deval_dataset
 
@@ -51,8 +44,11 @@ def generate_conversation_text(args, input_list, history, sys_msg=None):
 def _greedy_generate(model, inputs):
     """Bypass openlamm.generate to force greedy decoding (do_sample=False)."""
     input_embeds, input_masks = model.prepare_generation_embedding(inputs)
+    # Reference: use hardcoded IDs from generation method to avoid tokenizer inconsistencies.
+    # [2277, 29937] and [835] are observed stop tokens for the model.
+    stop_sequences = [[2277, 29937], [835]]
     stopping_criteria = StoppingCriteriaList([
-        LAMMStoppingCriteria([[2277, 29937], [835]], input_embeds)
+        LAMMStoppingCriteria(stop_sequences, input_embeds)
     ])
 
     outputs = model.llama_model.generate(
@@ -69,28 +65,19 @@ def _greedy_generate(model, inputs):
 def _greedy_text_generate(model: LAMMPEFTModel, prompt: str, device: torch.device, max_new_tokens: int = 200) -> str:
     """纯文本 greedy 生成（用于 intent 规划，稳定）。"""
 
-    class _StopOnSubstrings(StoppingCriteria):
-        def __init__(self, tokenizer, stop_strings: List[str], window_tokens: int = 128):
-            self.tokenizer = tokenizer
-            self.stop_strings = stop_strings
-            self.window_tokens = window_tokens
-
-        def __call__(self, input_ids, scores, **kwargs):
-            tail = input_ids[0][-self.window_tokens:]
-            txt = self.tokenizer.decode(tail, skip_special_tokens=True)
-            return any(s in txt for s in self.stop_strings)
-
     tok = model.llama_tokenizer(
         prompt,
         return_tensors="pt",
         add_special_tokens=True,
     ).to(device)
 
-    # Training data is multi-turn and often uses "### Human:" separators.
-    # For intent stage we want ONLY the first JSON. However the model may emit leading "###" tokens.
-    # So we stop ONLY when it starts the next turn marker ("### Human:").
+    # Calculate input embeddings to invoke LAMMStoppingCriteria
+    # This ensures consistent stopping logic with Stage 2
+    input_embeds = model.llama_model.model.embed_tokens(tok.input_ids)
+    
+    stop_sequences = [[2277, 29937], [835]]
     stopping_criteria = StoppingCriteriaList([
-        _StopOnSubstrings(model.llama_tokenizer, ["### Human:"], window_tokens=128)
+        LAMMStoppingCriteria(stop_sequences, input_embeds)
     ])
 
     out = model.llama_model.generate(
@@ -101,11 +88,10 @@ def _greedy_text_generate(model: LAMMPEFTModel, prompt: str, device: torch.devic
         use_cache=True,
         stopping_criteria=stopping_criteria,
     )
-    # Only decode newly generated tokens; otherwise the prompt content can pollute JSON extraction.
     gen = out[0][tok.input_ids.shape[1]:]
     text = model.llama_tokenizer.decode(gen, skip_special_tokens=True)
-    if "### Human:" in text:
-        text = text.split("### Human:", 1)[0]
+    if "###" in text:
+        text = text.split("###", 1)[0]  # 截断到第一个 "###"
     return text
 
 
@@ -123,10 +109,13 @@ def mllm_generate_one(
     temperature,
 ):
     """多模态 MLLM 生成：让模型真正看到 pcl + proposals（obj_list）"""
+    # NOTE: In this script we run Agent3d with use_system=False, so sys_msg is intentionally ignored.
+    # We keep the parameter to stay API-compatible with other callers.
+    _ = sys_msg
     safe_temperature = max(temperature, 1e-5)
     safe_top_p = min(max(top_p, 1e-5), 1.0)
     # IMPORTANT: openlamm.prepare_generation_embedding will add the role markers and <Pcl> tags.
-    # So here we must pass RAW prompt strings (no "### Human:" etc), otherwise prompts will be duplicated.
+    # So here we must pass RAW prompt strings (no "### human:" etc), otherwise prompts will be duplicated.
     prompt_text = prompt_list
 
     inputs = {
@@ -374,58 +363,58 @@ class Agent3D:
         return hits
 
     # ----------- Stage 1: intent/plan (text is OK, but still using same MLLM core) -----------
-    def mllm_intent(self, task_type: str, query: str) -> Dict[str, Any]:
+    def mllm_intent(self, query: str, pcl_paths, obj_list) -> Dict[str, Any]:
         """
         输出 tool_plan（1/2步）+ focus（target/A/B/room_type/keywords）
-        注意：这里用纯文本 greedy，主要为了 JSON 稳定；论文重点在 Stage2 多模态选择。
         """
         # Reconstruct the prompt to match the training data format.
+        # NOTE: prepare_generation_embedding adds "</Pcl> " and "\n### gpt:" automatically.
         inst = (
-            f"[AGENT_INTENT]\n"
-            f"Subtask={task_type}\n"
+            "[AGENT_INTENT]\n"
             f"UserQuestion: {query}\n\n"
-            "You are an MLLM agent controller. Output ONE JSON only.\n"
-            "Schema:\n"
-            "{\n"
-            "  \"stage\":\"intent\",\n"
-            "  \"task\":\"VisualGrounding_plus|Counting|RoomDetection|PositionRelation\",\n"
-            "  \"focus\": {\"target\":\"\", \"A\":\"\", \"B\":\"\"}\n"
-            "}\n"
+            # "You are an MLLM agent controller. Output ONE JSON only.\n"
         )
 
-        # The training data does not seem to use a controller-specific system message.
-        # We pass the full instruction as the prompt.
-        raw = _greedy_text_generate(self.model, inst, device=self.device, max_new_tokens=220)
-        js = self._extract_json_by_stage(raw, stage="intent", task_type=task_type)
+        out = mllm_generate_one(
+            self.args,
+            self.model,
+            prompt_list=[inst],
+            sys_msg=" ",
+            pcl_paths=pcl_paths,
+            obj_list=obj_list,
+            list_of_objpoints=[],
+            task_type="Agent3d",
+            max_length=1200,
+            top_p=1.0,
+            temperature=1e-5,
+        )
+        raw = out[0] if isinstance(out, list) and out else str(out)
 
-        # sanitize + enforce plan
-        focus = (js.get("focus", {}) if isinstance(js, dict) else {}) if isinstance(js, dict) else {}
+        print("intent",raw)
+
+        js = self._extract_json_by_stage(raw, stage="intent")
+
+        # Sanitize and enforce plan
+        focus = js.get("focus", {}) if isinstance(js, dict) else {}
+        task_guess = js.get("task", "RoomDetection") if isinstance(js, dict) else "RoomDetection"
+
         out = {
             "stage": "intent",
-            "task": task_type,
+            "prompt": inst,
+            "task": task_guess,
             "focus": {
-                "target": self._norm(focus.get("target", "")),
-                "A": self._norm(focus.get("A", "")),
-                "B": self._norm(focus.get("B", "")),
-                "room_type": self._norm(focus.get("room_type", "")),
+                "target": focus.get("target", ""),
+                "A": focus.get("A", ""),
+                "B": focus.get("B", ""),
+                "room_type": focus.get("room_type", ""),
                 "focus_keywords": [],
             },
-            "tool_plan": [],
+            "tool_plan": [
+                {"tool": "DETECT", "args": {"topk": 20}},
+                {"tool": "BBOX_UNION", "args": {}},
+            ],
             "raw": raw,
         }
-
-        if task_type == "Counting":
-            out["tool_plan"] = [
-                {"tool": "DETECT", "args": {"topk": int(self.args.max_obj)}},
-                {"tool": "COUNT", "args": {}},
-            ]
-        elif task_type == "RoomDetection":
-            out["tool_plan"] = [
-                {"tool": "DETECT", "args": {"topk": int(self.args.max_obj)}},
-                {"tool": "BBOX_UNION", "args": {}},
-            ]
-        else:
-            out["tool_plan"] = [{"tool": "DETECT", "args": {"topk": int(self.args.max_obj)}}]
 
         return out
 
@@ -442,33 +431,60 @@ class Agent3D:
         obj_lines = []
         for i, o in enumerate(det_topk[:self.args.max_obj]):
             name = o.get("name", "") or o.get("label", "") or ""
-            bbox = o.get("BoundingBox", None)
-            obj_lines.append(f"(obj{i}):{name} bbox={bbox}")
+            # --- FIX: Keep bbox but truncate precision to avoid token overflow/gibberish ---
+            # Training likely used bboxes, so removing them breaks alignment.
+            # Rounding to 2 decimal places keeps spatial hints while saving tokens.
+            raw_box = o.get("BoundingBox", [])
+            if isinstance(raw_box, list) and len(raw_box) == 6:
+                short_box = [round(x, 2) for x in raw_box]
+                bbox_str = str(short_box) # match training data (with spaces)
+            else:
+                bbox_str = "[]"
+            obj_lines.append(f"{name}{bbox_str}")
+        
         obj_text = "\n".join(obj_lines)
 
-        # Reconstruct the prompt to match the training data format.
-        prompt = (
-            f"[TOOL_RESULT]\n"
-            f"Tool=DETECT\n"
+        # IMPORTANT:
+        # openlamm.prepare_generation_embedding will wrap the provided prompt as:
+        #   "</Pcl> " + prompt + "\n### gpt:"
+        # So here we must concatenate history manually if we want multi-turn context.
+
+        # 1. Retrieve Intent Context
+        intent_prompt_str = intent.get("prompt", "")
+        intent_output_str = intent.get("raw", "")
+
+        # 2. Build Review Context
+        review_context = (
+            "[TOOL_RESULT]\n"
+            "Tool=DETECT\n"
             f"Objects(topk={len(det_topk)}):\n{obj_text}\n\n"
-            f"[AGENT_REVIEW]\n"
-            f"Subtask={task_type}\n"
+            "[AGENT_REVIEW]\n"
             f"UserQuestion: {query}\n\n"
             "Output ONE JSON only.\n"
-            "Schema:\n"
-            "{\n"
-            "  \"stage\":\"review\",\n"
-            "  \"summary\":\"one short sentence\",\n"
-            "  \"need_tool2\": true/false,\n"
-            "  \"selected_object_indices\": [int, ...],\n"
-            "  \"next_tool\": {\"tool\":\"NONE|COUNT|BBOX_UNION\", \"args\": {}}\n"
-            "}\n"
-            "Rules:\n"
-            "- VisualGrounding_plus: select EXACTLY 1 index; need_tool2=false; next_tool.tool=\"NONE\".\n"
-            "- PositionRelation: select EXACTLY 2 indices [A_idx,B_idx]; need_tool2=false; next_tool.tool=\"NONE\".\n"
-            "- Counting: select indices that match target; need_tool2=true; next_tool.tool=\"COUNT\".\n"
-            "- RoomDetection: select 2~8 indices that define the room extent; need_tool2=true; next_tool.tool=\"BBOX_UNION\".\n"
         )
+
+        # 3. Combine: intent_prompt + response + review_context
+        # The underlying `prepare_generation_embedding` adds the FINAL "\n### gpt:".
+        # It also adds the initial "</Pcl> " (or similar) BEFORE the prompt.
+        # So we need to structure the prompt such that:
+        #   <Pcl> [intent_prompt] \n### gpt: [intent_response] \n### human: [review_context] \n### gpt:
+        
+        # Since prepare_generation_embedding treats the input as ONE block after Pcl,
+        # we construct it like this:
+        if intent_prompt_str and intent_output_str:
+            # Reconstruct history:
+            # Note: intent_prompt_str usually starts with [AGENT_INTENT]...
+            prompt = (
+                f"{intent_prompt_str}\n"
+                f"### gpt: {intent_output_str}\n"
+                f"### human: {review_context}"
+            )
+        else:
+            # Fallback if intent context missing (should not happen in normal flow)
+            prompt = review_context
+
+        if getattr(self.args, "debug_prompts", False):
+            print("[DEBUG][REVIEW_PROMPT]\n" + prompt)
 
         # 关键：这里调用多模态生成，传入 pcl_paths + obj_list=det_topk
         # IMPORTANT: sys_msg=" " (space) to overwrite default system prompt with empty-like string.
@@ -482,13 +498,15 @@ class Agent3D:
             obj_list=det_topk,
             list_of_objpoints=[],              # scene tasks 默认空即可（与 inference_3d 一致）
             task_type=task_type,
-            max_length=200,   # 减少续写 Schema 的概率
+            max_length=1200,   # 减少续写 Schema 的概率
             top_p=1.0,
             temperature=1e-5,
         )
         raw = out[0] if isinstance(out, list) and out else str(out)
-        raw_clean = raw.split("###", 1)[0]  # 截断可能的下一轮对话/续写
-        js = self._extract_json_by_stage(raw_clean, stage="review")
+
+        print("review",raw)
+
+        js = self._extract_json_by_stage(raw, stage="review")
         # 容错：兼容模型误写的字段名
         if isinstance(js, dict):
             if "need_tool" in js and "need_tool2" not in js:
@@ -501,7 +519,10 @@ class Agent3D:
             "summary": "",
             "need_tool2": task_type in {"Counting", "RoomDetection"},
             "selected_object_indices": [],
+            "room_groups": [],
+            "next_tool": {"tool": "FINISH"},
             "raw": raw,
+            "parse_error": False,
         }
         if isinstance(js, dict):
             if isinstance(js.get("summary", ""), str):
@@ -509,6 +530,24 @@ class Agent3D:
             if isinstance(js.get("need_tool2", None), bool):
                 review["need_tool2"] = js["need_tool2"]
             review["selected_object_indices"] = self._safe_int_list(js.get("selected_object_indices", []))
+            # room_groups 解析与裁剪
+            rg = js.get("room_groups", [])
+            if isinstance(rg, list):
+                clean_groups = []
+                for g in rg:
+                    if not isinstance(g, dict):
+                        continue
+                    label = (g.get("room_label") or "").strip() or "livingroom"
+                    idxs = self._safe_int_list(g.get("indices", []))
+                    if len(idxs) < 2:
+                        continue
+                    clean_groups.append({"room_label": label, "indices": idxs[:8]})
+                review["room_groups"] = clean_groups
+            nt = js.get("next_tool", {})
+            if isinstance(nt, dict) and isinstance(nt.get("tool", None), str):
+                review["next_tool"] = {"tool": nt.get("tool"), "args": nt.get("args", {})}
+        else:
+            review["parse_error"] = True
 
         # 固定预算：Count/Room 必须 tool2；VG/REL 不执行 tool2
         if task_type in {"Counting", "RoomDetection"}:
@@ -519,6 +558,44 @@ class Agent3D:
         # clamp indices
         k = len(det_topk)
         review["selected_object_indices"] = [i for i in review["selected_object_indices"] if 0 <= i < k]
+
+        # 强制校正 next_tool（与任务一致）
+        if task_type == "RoomDetection":
+            review["next_tool"] = {"tool": "BBOX_UNION", "args": {}}
+        elif task_type == "Counting":
+            review["next_tool"] = {"tool": "COUNT", "args": {}}
+        elif task_type == "PositionRelation":
+            review["next_tool"] = {"tool": "REL_DIR", "args": {}}
+        else:
+            review["next_tool"] = {"tool": "FINISH", "args": {}}
+
+        # 如果 RoomDetection/Counting 解析失败，尝试从 raw 中提取数字作兜底
+        if task_type == "RoomDetection" and not review["room_groups"]:
+            import re
+            nums = []
+            try:
+                nums = [int(x) for x in re.findall(r"\d+", raw)]
+            except Exception:
+                nums = []
+            uniq = []
+            for v in nums:
+                if 0 <= v < k and v not in uniq:
+                    uniq.append(v)
+            if len(uniq) >= 2:
+                review["room_groups"] = [{"room_label": intent.get("focus", {}).get("room_type", "") or "livingroom", "indices": uniq[:8]}]
+
+        if task_type == "Counting" and not review["selected_object_indices"]:
+            import re
+            nums = []
+            try:
+                nums = [int(x) for x in re.findall(r"\d+", raw)]
+            except Exception:
+                nums = []
+            uniq = []
+            for v in nums:
+                if 0 <= v < k and v not in uniq:
+                    uniq.append(v)
+            review["selected_object_indices"] = uniq[:k]
 
         return review
 
@@ -562,39 +639,35 @@ class Agent3D:
         return text, trace
 
     # ----------- main solve loop -----------
-    def solve(self, task_type: str, data_item: Dict[str, Any], obj_list: List[Dict[str, Any]]) -> Tuple[str, Dict[str, Any]]:
+    def solve(self, task_type: str, data_item: Dict[str, Any], obj_list: List[Dict[str, Any]]) -> str:
         query = data_item['query'][0] if isinstance(data_item['query'], list) else data_item['query']
         pcl_paths = data_item['pcl']
-
-        agent_trace: Dict[str, Any] = {
-            "task_type": task_type,
-            "query": query,
-            "budget": {"max_tool_calls": 2, "used": 0},
-        }
 
         # Ablation: w/o tool => direct answer (baseline)
         if self.args.wo_tool:
             direct = mllm_generate_one(
                 self.args, self.model,
                 prompt_list=[query],
-                sys_msg="You are a helpful multimodal assistant.",
+                sys_msg=" ",
                 pcl_paths=pcl_paths,
                 obj_list=obj_list[:self.args.max_obj],
                 list_of_objpoints=[],
                 task_type=task_type,
-                max_length=min(self.args.max_tgt_len, 256),
+                max_length=min(self.args.max_tgt_len, 1200),
                 top_p=1.0,
                 temperature=1e-5,
             )
             text = direct[0] if isinstance(direct, list) and direct else str(direct)
-            agent_trace["mode"] = "wo_tool_direct"
-            return text, agent_trace
+            return text
+        
+        if task_type == "RoomDetection":
+            query = "Locate the locations of every room within the scene."
 
         # Step1: intent (plan tool calls)
-        intent = self.mllm_intent(task_type, query)
-        agent_trace["intent"] = intent
+        intent = self.mllm_intent(query, pcl_paths, obj_list=obj_list[:self.args.max_obj])
 
-        print(intent)
+        # task_inferred = intent.get("task", task_type) or task_type
+        task_inferred = task_type
 
         # Tool1: DETECT (reuse)
         all_objs = obj_list or []
@@ -602,7 +675,7 @@ class Agent3D:
         # Strategy:
         # - Counting/Room: prioritize RECALL (filter by keyword).
         # - VG/Relation: prioritize CONTEXT/ORDER (natural top-k).
-        if task_type in ["Counting", "RoomDetection"]:
+        if task_inferred in ["Counting", "RoomDetection"]:
             keywords = []
             focus = intent.get("focus", {})
             if focus.get("target"):
@@ -630,36 +703,41 @@ class Agent3D:
             # VisualGrounding_plus / PositionRelation
             det_topk = all_objs[:int(self.args.max_obj)]
 
-        agent_trace["budget"]["used"] += 1
-        agent_trace["tool1"] = {"tool": "DETECT", "n": len(det_topk), "topk": int(self.args.max_obj)}
-
         if not det_topk:
             # hard fallback
             if task_type == "Counting":
-                return "1", {**agent_trace, "mode": "empty_detect_fallback_to_1"}
-            return "unknown", {**agent_trace, "mode": "empty_detect"}
+                return "1"
+            return "unknown"
 
         # Step2: review/select (MULTIMODAL MLLM)
-        review = self.mllm_review_multimodal(task_type, query, pcl_paths, det_topk, intent)
-        
-        print(review)
+        review = self.mllm_review_multimodal(task_inferred, query, pcl_paths, det_topk, intent)
 
-        agent_trace["review"] = review
         selected = review.get("selected_object_indices", [])
 
         # Tool2 decision (fixed budget)
         text = "unknown"
 
-        if task_type == "VisualGrounding_plus":
-            if len(selected) != 1:
+        if task_inferred == "Counting":
+            # must do tool2 COUNT
+            
+             # Fallback if selected empty
+            if not selected:
                 tgt = intent.get("focus", {}).get("target", "")
                 hits = self._find_by_keywords_fallback(det_topk, [tgt] if tgt else [])
-                selected = [hits[0]] if hits else [0]
-                agent_trace["fallback_select"] = {"reason": "vg_fix", "selected": selected}
-            bb = det_topk[selected[0]].get("BoundingBox")
-            text = str(bb)
+                selected = hits
 
-        elif task_type == "PositionRelation":
+            count_val = len(det_topk) if candidates else len(selected)
+            # Align with training data format
+            tool_res_str = f"Tool=COUNT\nTarget={intent.get('focus', {}).get('target', 'object')}\ncount_all={count_val}\nfinal_count={count_val}"
+            
+            # For counting, generally hard logic is preferred for accuracy, 
+            # but to align with training "flow", we pass it through MLLM finish (or hybrid).
+            # Here we let MLLM generate the answer based on the tool result.
+            # final_text = self.mllm_finish(task_inferred, query, tool_res_str, pcl_paths, det_topk, intent=intent, review=review)
+            text = str(count_val) if count_val != 0 else "1"
+
+
+        elif task_inferred == "PositionRelation":
             if len(selected) != 2:
                 A = intent.get("focus", {}).get("A", "")
                 B = intent.get("focus", {}).get("B", "")
@@ -668,92 +746,171 @@ class Agent3D:
                 a_idx = a_hits[0] if a_hits else 0
                 b_idx = b_hits[0] if b_hits else (1 if len(det_topk) > 1 else 0)
                 selected = [a_idx, b_idx]
-                agent_trace["fallback_select"] = {"reason": "rel_fix", "selected": selected, "A": A, "B": B}
-            bbA = det_topk[selected[0]].get("BoundingBox")
-            bbB = det_topk[selected[1]].get("BoundingBox")
-            if isinstance(bbA, list) and len(bbA) == 6 and isinstance(bbB, list) and len(bbB) == 6:
-                text = self.geom.relation_4way(bbA, bbB)
-            else:
-                text = "unknown"
 
-        elif task_type == "Counting":
-            # must do tool2 COUNT
-            agent_trace["budget"]["used"] += 1
-            agent_trace["tool2"] = {"tool": "COUNT"}
-            # 如果 MLLM 没选出来，回退到关键词匹配；再不行就 0
-            if not selected:
+            # Calculate geometric relation
+            # Note: Training data shows Tool=REL_DIR without explicit relation string, 
+            # but often includes context. We simulate the geometric calculation result.
+            bbA = det_topk[selected[0]].get("BoundingBox") if selected[0] < len(det_topk) else None
+            bbB = det_topk[selected[1]].get("BoundingBox") if selected[1] < len(det_topk) else None
+            
+            # Align format
+            tool_res_str = f"Tool=REL_DIR\nA_idx={selected[0]}\nB_idx={selected[1]}"
+
+            if isinstance(bbA, list) and isinstance(bbB, list):
+                rel = self.geom.relation_4way(bbA, bbB)
+                # We inject the calculated relation hint so MLLM can separate style from fact
+                # (Training data might not have the answer in tool result, but here we are the tool)
+                tool_res_str += f"\nRelationHint={rel}"
+            
+            final_text = self.mllm_finish(task_inferred, query, tool_res_str, pcl_paths, det_topk, intent=intent, review=review)
+            text = final_text
+
+
+        elif task_inferred == "VisualGrounding_plus":
+            # VisualGrounding_plus is just DETECT -> FINISH. 
+            # Review step selected the index.
+            if len(selected) != 1:
                 tgt = intent.get("focus", {}).get("target", "")
                 hits = self._find_by_keywords_fallback(det_topk, [tgt] if tgt else [])
-                selected = hits
-                agent_trace["fallback_select"] = {"reason": "count_fix", "selected_n": len(selected), "target": tgt}
+                selected = [hits[0]] if hits else [0]
+
+            # In training data, VG finish tool result is just "(ready)" or specific bbox. 
+            # The MLLM has already seen the object list in Review.
+            # However, providing the bbox again in tool result helps stability.
+            # Training example: "[TOOL_RESULT]\nTool=FINISH\n(ready)"
             
-            count_result = len(selected)
+            idx = selected[0]
+            # We must adhere to protocol: MLLM looks up index from memory/context
+            # OR we provide helper info.
+            tool_res_str = "Tool=FINISH\n(ready)" 
+            
+            # Since we pass context in a stateless way to mllm_finish (it just sees the prompt string),
+            # we SHOULD include the bbox in TOOL_RESULT so MLLM can copy it to final answer.
+            # BUT the training example shows "(ready)". This implies the MLLM remembers 
+            # or we construct the prompt differently.
+            # To ensure it works in this stateless script, we cheat slightly and provide the info key.
+            
+            bb = det_topk[idx].get("BoundingBox") if idx < len(det_topk) else []
+            # Override for robustness:
+            tool_res_str = f"Tool=FINISH\nSelectedObjIndex={idx}\nBBox={bb}"
+            
+            final_text = self.mllm_finish(task_inferred, query, tool_res_str, pcl_paths, det_topk, intent=intent, review=review)
+            text = final_text
 
-            # New logic to adjust the count based on options
-            options = data_item.get('gt_choices')
-            # The data loader might wrap single items in a list
-            if isinstance(options, list) and len(options) > 0 and isinstance(options[0], list):
-                options = options[0]
+        elif task_inferred == "RoomDetection":
+            groups = review.get("room_groups", []) or []
+            if not groups:
+                idxs = selected if selected else list(range(min(4, len(det_topk))))
+                room_label = intent.get("focus", {}).get("room_type", "") or "livingroom"
+                groups = [{"room_label": room_label, "indices": idxs}]
 
-            if isinstance(options, list) and all(isinstance(i, (int, float)) for i in options):
-                if count_result == 0:
-                    text = "1"
-                else:
-                    if count_result in options:
-                        text = str(count_result)
-                    else:
-                        larger_options = sorted([opt for opt in options if opt > count_result])
-                        if larger_options:
-                            text = str(larger_options[0])
-                        else:
-                            # If no larger option, fallback to the largest option available
-                            text = str(max(options))
-            else:
-                 text = str(count_result)
+            union_results = []
+            results_str = ""
+            for g in groups:
+                idxs = [i for i in (g.get("indices", []) or []) if 0 <= i < len(det_topk)]
+                bboxes = [det_topk[i].get("BoundingBox") for i in idxs if isinstance(det_topk[i].get("BoundingBox"), list)]
+                uni = self.geom.union_bbox(bboxes) if bboxes else None
+                union_results.append({
+                    "room_label": g.get("room_label", "room"),
+                    "indices": idxs,
+                    "union_bbox": uni,
+                })
+                # Format: label [x, y, z, l, w, h]
+                if uni:
+                    s_uni = [round(x, 2) for x in uni]
+                    results_str += f"{g.get('room_label', 'room')} {str(s_uni)}\n"
 
-        elif task_type == "RoomDetection":
-            # must do tool2 BBOX_UNION
-            agent_trace["budget"]["used"] += 1
-            agent_trace["tool2"] = {"tool": "BBOX_UNION"}
-
-            # 如果 MLLM 选太少，回退：按 room_type 的 hints 匹配；再不行 union 前 3 个
-            if len(selected) < 2:
-                room_type = intent.get("focus", {}).get("room_type", "")
-                fk = intent.get("focus", {}).get("focus_keywords", []) or []
-                if not fk:
-                    fk = self.ROOM_HINTS.get(room_type, [])
-                hits = self._find_by_keywords_fallback(det_topk, fk)
-                if len(hits) >= 2:
-                    selected = hits[:8]
-                else:
-                    selected = list(range(min(3, len(det_topk))))
-                agent_trace["fallback_select"] = {"reason": "room_fix", "room_type": room_type, "selected": selected}
-
-            bboxes = []
-            for i in selected:
-                bb = det_topk[i].get("BoundingBox")
-                if isinstance(bb, list) and len(bb) == 6:
-                    bboxes.append(bb)
-            union = self.geom.union_bbox(bboxes) if bboxes else det_topk[0].get("BoundingBox")
-
-            room_label = intent.get("focus", {}).get("room_type", "") or "unknown"
-            text = f"{room_label} {union}"
-
-        else:
-            text = "unknown"
-
-        agent_trace["selected_indices_final"] = selected
-        if task_type == "Counting":
-            agent_trace["selected_names_final"] = [
-                (det_topk[i].get("name") or det_topk[i].get("label") or "")
-                for i in selected
-                if 0 <= i < len(det_topk)
-            ]
-
+            # Pass structured text instead of JSON to avoid confusing the LLM
+            tool_res_str = f"Tool=BBOX_UNION\nUnionResults:\n{results_str}"
+            final_text = self.mllm_finish(task_inferred, query, tool_res_str, pcl_paths, det_topk, intent=intent, review=review)
+            text = final_text
+        
         # Reflection: one-shot validation + fallback
-        text_fixed, refl = self.reflection_fix(task_type, intent, det_topk, selected, text)
-        agent_trace["reflection"] = refl
-        return text_fixed, agent_trace
+        text_fixed, _ = self.reflection_fix(task_inferred, intent, det_topk, selected, text)
+        return text_fixed
+
+    def mllm_finish(self, task_type: str, user_question: str, tool2_result_text: str, pcl_paths, obj_list, intent=None, review=None) -> str:
+        def _simplify_bbox_numbers(s: str) -> str:
+            import re
+            def _round(m):
+                try:
+                    return f"{float(m.group()):.2f}"
+                except Exception:
+                    return m.group()
+            return re.sub(r"-?\d+\.\d+", _round, s)
+
+        simplified = _simplify_bbox_numbers(tool2_result_text)
+        
+        # Format detected objects list for review string reconstruction
+        obj_lines = []
+        for i, o in enumerate(obj_list[:self.args.max_obj]):
+            name = o.get("name", "") or o.get("label", "") or ""
+            raw_box = o.get("BoundingBox", [])
+            if isinstance(raw_box, list) and len(raw_box) == 6:
+               short_box = [round(x, 2) for x in raw_box]
+               bbox_str = str(short_box)
+            else:
+               bbox_str = "[]"
+            obj_lines.append(f"{name}{bbox_str}")
+        obj_text = "\n".join(obj_lines)
+
+        # 1. Retrieve Intent Context
+        intent_prompt_str = intent.get("prompt", "") if intent else ""
+        intent_output_str = intent.get("raw", "") if intent else ""
+
+        # 2. Build Review Context (MUST MATCH mllm_review_multimodal)
+        review_context_user = (
+            "[TOOL_RESULT]\n"
+            "Tool=DETECT\n"
+            f"Objects(topk={len(obj_list)}):\n{obj_text}\n\n"
+            "[AGENT_REVIEW]\n"
+            f"UserQuestion: {user_question}\n\n"
+            "Output ONE JSON only.\n"
+        )
+        review_output_str = review.get("raw", "") if review else ""
+
+        # 3. Build Finish Context
+        finish_context_user = (
+            "[TOOL_RESULT]\n" +
+            f"{simplified}\n\n" +
+            "[AGENT_FINISH]\n" +
+            f"UserQuestion: {user_question}\n\n"
+        )
+
+        # 4. Concatenate History
+        # Format:
+        # <Pcl> [IntentUser] \n### gpt: [IntentOut] \n### human: [ReviewUser] \n### gpt: [ReviewOut] \n### human: [FinishUser] \n### gpt:
+        if intent_prompt_str and intent_output_str and review_output_str:
+            prompt = (
+                f"{intent_prompt_str}\n" 
+                f"### gpt: {intent_output_str}\n"
+                f"### human: {review_context_user}\n"
+                f"### gpt: {review_output_str}\n"
+                f"### human: {finish_context_user}"
+            )
+        else:
+            prompt = finish_context_user
+
+        if getattr(self.args, "debug_prompts", False):
+            print("[DEBUG][FINISH_PROMPT]\n" + prompt)
+
+        # Finish 阶段用纯文本生成以稳定输出格式
+        out = mllm_generate_one(
+            self.args,
+            self.model,
+            prompt_list=[prompt],
+            sys_msg=" ",
+            pcl_paths=pcl_paths,
+            obj_list=obj_list[:self.args.max_obj],
+            list_of_objpoints=[],
+            task_type="Agent3d",
+            max_length=1200,
+            top_p=1.0,
+            temperature=1e-5,
+        )
+        raw = out[0] if isinstance(out, list) and out else str(out)
+        print("finish", raw)
+        return (raw or "").strip()
 
 
 # -------------------------
@@ -773,7 +930,7 @@ def parse_args():
     parser.add_argument('--encoder_ckpt_path', type=str,
                         default='/data/HTC/Data/model_zoo/epcl_ckpt/epcl_scannet_vit-L-14_256tokens_latest.pth')
     parser.add_argument('--vicuna_ckpt_path', type=str, default='/data/HTC/Data/model_zoo/vicuna-7b/Vicuna_7B_v0')
-    parser.add_argument('--delta_ckpt_path', type=str, default='/data/HTC/Data/model_zoo/llm_exe/agent/pytorch_model_ep1.pt')
+    parser.add_argument('--delta_ckpt_path', type=str, default='/data/HTC/Data/model_zoo/llm_exe/agent_demo/pytorch_model.pt')
 
     parser.add_argument('--train_stage', type=int, default=2)
     parser.add_argument('--stage', type=int, default=2)
@@ -801,6 +958,10 @@ def parse_args():
     parser.add_argument('--wo_tool', action='store_true')
     parser.add_argument('--dry_run', type=int, default=0)
     parser.add_argument('--do_sample', action='store_true')
+
+    # debugging
+    parser.add_argument('--debug_prompts', action='store_true',
+                        help='Print and record constructed agent prompts (intent stage).')
 
     # detector artifacts
     parser.add_argument('--detection_path', type=str,
@@ -842,6 +1003,173 @@ def main():
     model.llama_model = model.llama_model.merge_and_unload()
     model = model.eval().half().to(device)
 
+    def extract_multimodal_feature_patched(self, inputs):
+        """Monkey-patched extract_multimodal_feature to handle batch dimension."""
+        # Call the original method (bound to self)
+        # We need to access the UNBOUND original method from the class if we can't access 'super' easily
+        # But 'self' here is the Agent3D instance, not the model instance. Wait.
+        # This function is intended to replace model.extract_multimodal_feature.
+        
+        # We need to replicate the logic because we can't easily call "original but slightly different"
+        # without infinite recursion if we monkeypatch.
+        # So we just copy the critical logic fix.
+        
+        features = []
+        if "pcl_paths" in inputs and inputs["pcl_paths"]:
+            # Note: We use self.test_encode_pcl which is available on the model instance
+            pcl_embeds, _ = self.test_encode_pcl(
+                inputs["pcl_paths"], 
+                inputs["obj_list"][:20], 
+                inputs['list_of_objpoints']
+            )
+            # FIX: Unwrap batch dimension so that feature_embeds is [N_obj, Dim]
+            # If [1, N, D] -> [N, D]
+            if isinstance(pcl_embeds, torch.Tensor) and pcl_embeds.dim() == 3 and pcl_embeds.shape[0] == 1:
+                return pcl_embeds[0]
+            return pcl_embeds
+            
+        # Fallback to original logic for other cases if needed, but for Agent3d pcl is main
+        return torch.cat(features).sum(dim=0).unsqueeze(0) if features else torch.tensor([])
+
+    def prepare_generation_embedding_patched(self, inputs):
+        """Monkey-patched prepare_generation_embedding."""
+        # We need to re-implement specific logic because we can't easily patch middle of function
+        
+        eov = VISION_TAGS["eov"][self.vision_type]
+        prompt_list = inputs["prompt"]
+        
+        # Use our patched extractor
+        if len(inputs["modality_embeds"]) == 1:
+            feature_embeds = inputs["modality_embeds"][0]
+        else:
+            # CALL PATCHED EXTRACTOR
+            # We can't call self.extract_multimodal_feature because 'self' is the model
+            # and we might have monkeypatched it, but let's assume we do the fix inline here
+            # OR we call the method we (will) attach to the instance.
+            feature_embeds = self.extract_multimodal_feature(inputs)
+
+        # Logic for Agent3d (falls into 'else' block of max_obj)
+        if inputs["task_type"] in ["Classification",'DescriptionObj','ConversationObj']:
+            max_obj = 12
+            x,y,z = np.mean(inputs['list_of_objpoints'], axis=0)
+            class_box_gt = [[round(x, 1), round(y, 1), round(z, 1)]]
+        elif inputs["task_type"] in ["Detection"]:
+            max_obj = 12
+            class_box_gt = [[0,0,0]]
+        else:
+            max_obj = 20
+            # class_list = [classname["name"] for classname in inputs["obj_list"]]
+            class_box_gt = []
+            for classname in inputs["obj_list"]:
+                if 'BoundingBox' in classname:
+                     b = classname['BoundingBox']
+                     class_box_gt.append([round(b[0], 2),round(b[1], 2),round(b[2], 2)])
+                else: 
+                     class_box_gt.append([0.0,0.0,0.0])
+
+        batch_input_ids = []
+        for index,b in enumerate(class_box_gt[:max_obj]):
+            class_name = 'obj'+str(index)+str(b)+'!'
+            class_name = self.llama_tokenizer(class_name, add_special_tokens=False).input_ids
+            batch_input_ids.append(torch.LongTensor(class_name))
+
+        if not batch_input_ids:
+            # Handle empty case to prevent crash
+            input_embeds = torch.zeros((0, self.llama_model.config.hidden_size), device=self.device)
+        else:
+            input_ids = rnn.pad_sequence(
+                batch_input_ids, batch_first=True, padding_value=self.llama_tokenizer.pad_token_id
+            )
+            input_ids = input_ids.to(self.device)
+            input_embeds = self.llama_model.model.embed_tokens(input_ids)
+
+        # Interleave vision embeddings
+        vision_embeds_my = []
+        # FIX: Ensure we don't index out of bounds if lengths mismatch
+        limit = min(len(feature_embeds), len(input_embeds), max_obj)
+        
+        for index in range(limit):
+            vis = feature_embeds[index] # [Dim] or [1, Dim]
+            txt = input_embeds[index]   # [Seq, Dim]
+            
+            if vis.dim() == 1: vis = vis.unsqueeze(0)
+            
+            vision_embeds_my.append(vis)
+            vision_embeds_my.append(txt)
+            
+        if vision_embeds_my:
+            vision_embeds = torch.cat(vision_embeds_my).unsqueeze(dim=0)
+        else:
+             # Fallback shape [1, 0, Dim]
+             vision_embeds = torch.zeros((1, 0, self.llama_model.config.hidden_size), device=self.device, dtype=self.llama_model.dtype)
+
+        batch_size = vision_embeds.shape[0]
+        
+        # ... rest of the standard logic ...
+        use_system = bool(inputs.get("use_system", False))
+        p_before = make_prompt_start(
+            use_system=use_system,
+            vision_type=self.vision_type,
+            task_type=inputs.get("task_type", "normal"),
+        )
+        # (Assuming standard make_prompt_start logic holds)
+        if isinstance(p_before, list):
+            p_before_tokens = self.llama_tokenizer(
+                p_before,
+                padding="longest",
+                add_special_tokens=False,
+                return_tensors="pt",
+            ).to(self.device)
+            p_before_embeds = self.llama_model.model.embed_tokens(p_before_tokens.input_ids)
+        else:
+            p_before_tokens = self.llama_tokenizer(
+                p_before, return_tensors="pt", add_special_tokens=False
+            ).to(self.device)
+            p_before_embeds = self.llama_model.model.embed_tokens(
+                p_before_tokens.input_ids
+            ).expand(
+                batch_size, -1, -1
+            )
+
+        p_after_texts = [f"{eov} " + prompt + "\n### gpt:" for prompt in prompt_list]
+        p_after_tokens = self.llama_tokenizer(
+            p_after_texts,
+            padding="longest", return_length=True,
+            add_special_tokens=False, return_tensors="pt"
+        ).to(self.device)
+        p_after_masks_len = p_after_tokens.length.max() - p_after_tokens.length
+        p_after_embeds = self.llama_model.model.embed_tokens(p_after_tokens.input_ids)
+
+        bos = (
+            torch.ones(
+                [batch_size, 1],
+                dtype=p_before_tokens.input_ids.dtype,
+                device=p_before_tokens.input_ids.device,
+            )
+            * self.llama_tokenizer.bos_token_id
+        )
+        bos_embeds = self.llama_model.model.embed_tokens(bos)
+
+        inputs_embeds = torch.cat(
+            [bos_embeds, p_before_embeds, vision_embeds, p_after_embeds], dim=1
+        )
+
+        tokens_len = inputs_embeds.shape[1] - p_after_masks_len
+        new_inputs_embeds = torch.zeros_like(inputs_embeds)
+        inputs_embeds_masks = torch.zeros(inputs_embeds.shape[:-1],
+                                         dtype=torch.int64, device=self.device)
+        for idx in range(batch_size):
+            inputs_embeds_masks[idx, -tokens_len[idx]:] = 1
+            new_inputs_embeds[idx, -tokens_len[idx]:, :] = inputs_embeds[idx, :tokens_len[idx], :]
+            new_inputs_embeds[idx, :-tokens_len[idx], :] = inputs_embeds[idx, tokens_len[idx]:, :]
+
+        return new_inputs_embeds, inputs_embeds_masks
+
+    # Apply Monkey Patch
+    import types
+    model.extract_multimodal_feature = types.MethodType(extract_multimodal_feature_patched, model)
+    model.prepare_generation_embedding = types.MethodType(prepare_generation_embedding_patched, model)
+
     det_tool = DetectionTool3D(args.detection_path)
     agent = Agent3D(args, model, det_tool, device=device)
 
@@ -859,8 +1187,8 @@ def main():
             pcl_paths = data_item['pcl']
             obj_list = det_tool.proposals_for_scene(pcl_paths[0], idx)
 
-            start = time.time()
-            text, trace = agent.solve(args.task_type, data_item, obj_list)
+            start = time.time() 
+            text = agent.solve(args.task_type, data_item, obj_list)
             elapsed = time.time() - start
 
             ans = {
@@ -868,7 +1196,6 @@ def main():
                 'pcl': pcl_paths,
                 'text': text,
                 'delta_path': args.delta_ckpt_path,
-                'agent_trace': {**trace, 'elapsed': elapsed},
             }
             fout.write(json.dumps(ans) + '\n')
             fout.flush()

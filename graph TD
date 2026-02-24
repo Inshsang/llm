@@ -1,0 +1,13 @@
+graph TD
+    User[用户提问 User Question] --> Intent[阶段一: 意图规划 (Intent MLLM)]
+    Intent -->|解析出 Task & Keywords| Tool1[工具 I: 物体检测 (Detection Tool)]
+    Tool1 -->|检索候选物体 Candidates| Review[阶段二: 视觉审阅 (Review Multimodal MLLM)]
+    Review -->|输入: 点云 + 候选列表| Selection{模型决策: 索引选择}
+    Selection -->|选中物体索引| Tool2[工具 II: 几何计算 (Geometric Tool)]
+    
+    Tool2 -->|Logic: Count| Res1[计算数量]
+    Tool2 -->|Logic: Relation| Res2[计算空间位置关系]
+    Tool2 -->|Logic: Union| Res3[计算包围盒并集]
+    
+    Res1 & Res2 & Res3 -->|工具结果 Tool Result| Finish[阶段三: 终结生成 (Finish MLLM)]
+    Finish --> Output[最终回答 Final Answer]

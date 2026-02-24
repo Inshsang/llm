@@ -106,6 +106,8 @@ class LAMMStoppingCriteria(StoppingCriteria):
         :return bool: stop or not
         """
         for stop in self.stops:
+            if input_ids.numel() < stop.numel():
+                continue
             if torch.all((stop == input_ids[-len(stop):])).item():
                 return True
         return False
@@ -151,7 +153,7 @@ def build_one_instance(tokenizer, conversation, vision_type="image"):
             turn["value"] = (
                 turn["value"].replace(f"{pos}\n", "").replace(f"\n{pos}", "")
             )
-            text = f"{eov} " + turn["value"] + "\n### Assistant:"
+            text = f"{eov} " + turn["value"] + "\n### gpt:"
             one_input_id = tokenizer(text, add_special_tokens=False).input_ids
             input_ids += one_input_id
             target_ids += [-100] * len(
@@ -159,7 +161,7 @@ def build_one_instance(tokenizer, conversation, vision_type="image"):
             )  # do not perform loss regression on human prompt
         else:
             if role == "human":
-                text = "Human: " + turn["value"] + "\n### Assistant:"
+                text = "human: " + turn["value"] + "\n### gpt:"
                 one_input_id = tokenizer(text, add_special_tokens=False).input_ids
                 input_ids += one_input_id
                 target_ids += [-100] * len(one_input_id)
@@ -216,7 +218,7 @@ def make_prompt_start(use_system=False, vision_type="image", task_type="normal")
     :param str task_type: task type of current sample, defaults to 'normal'
     :return str: resulting starting prompt
     """
-    PROMPT_START = f'### Human: {VISION_TAGS["sov"][vision_type]}'
+    PROMPT_START = f'### human: {VISION_TAGS["sov"][vision_type]}'
     if use_system:
         if task_type == "normal":
             return f"{conversations.default_conversation.system}\n\n" + PROMPT_START
@@ -409,15 +411,10 @@ class LAMMPEFTModel(nn.Module):
             )
             print("########################Initial llama_proj##########################")
         elif self.train_stage == 2:
-            # 加载保存的参数
-            llama_proj = torch.load("/data/HTC/Data/model_zoo/llm_exe/projector/llama_proj1.pth",map_location="cpu")
-            processed_llama = {key.replace("llama_proj.", ""): value for key, value in llama_proj.items()}
-            # 加载参数到llama_pro层
-            self.llama_proj.load_state_dict(processed_llama)
-            for name, param in self.llama_proj.named_parameters():
+            # 加载保存的llm和projector参数
+            for name, param in self.llama_model.named_parameters():
                 param.requires_grad = False
-            self.llama_proj.eval()
-            print("Froeze llama_proj.")
+            print("Froeze ll.")
         elif self.train_stage == 3:
             # 微调pro和llm
             # 加载保存的参数
@@ -804,11 +801,11 @@ class LAMMPEFTModel(nn.Module):
         Bbox = inputs["points_path"]
         label_path = inputs["label_path"]
 
-        if task_type[0] in ['VisualGrounding3d','Detection3d',"PositionRelation","Counting","Navigation","RoomDetection3d"]:
-            self.max_tgt_len = 400
+        if task_type[0] in ['Agent3d','VisualGrounding3d','Detection3d',"PositionRelation","Counting","Navigation","RoomDetection3d"]:
+            self.max_tgt_len = self.max_tgt_len
             max_obj = 20
         else:
-            self.max_tgt_len = 800
+            self.max_tgt_len = self.max_tgt_len
             max_obj = 1
         vis_embed_list,class_box_gt = [],[]
         points_path = Bbox[0]
@@ -870,6 +867,7 @@ class LAMMPEFTModel(nn.Module):
         input_ids, target_ids, attention_mask = process_batch_instance(
             self.llama_tokenizer, output_texts, self.max_tgt_len, self.vision_type
         )
+        print(target_ids.shape)
         inputs_embeds, targets, attention_mask = self.prompt_wrap(
             vision_embeds,
             input_ids,
@@ -914,6 +912,9 @@ class LAMMPEFTModel(nn.Module):
         if "pcl_paths" in inputs and inputs["pcl_paths"]:
             # pcl_embeds, _ = self.encode_pcl(inputs["pcl_paths"])
             pcl_embeds, _ = self.test_encode_pcl(inputs["pcl_paths"],inputs["obj_list"][:20],inputs['list_of_objpoints'])
+            # FIX: Unwrap batch dimension so that feature_embeds is [N_obj, Dim]
+            if isinstance(pcl_embeds, torch.Tensor) and pcl_embeds.dim() == 3 and pcl_embeds.shape[0] == 1:
+                return pcl_embeds[0]
             return pcl_embeds
             features.append(pcl_embeds)
         # TODO: Cautions HERE! Multimodality allowed in test ONLY!
@@ -949,7 +950,7 @@ class LAMMPEFTModel(nn.Module):
         else:
             max_obj = 20
             class_list = [classname["name"] for classname in inputs["obj_list"]]
-            class_box_gt = [[round(classname['BoundingBox'][0], 1),round(classname['BoundingBox'][1], 1),round(classname['BoundingBox'][2], 1)] for classname in inputs["obj_list"]]
+            class_box_gt = [[round(classname['BoundingBox'][0], 2),round(classname['BoundingBox'][1], 2),round(classname['BoundingBox'][2], 2)] for classname in inputs["obj_list"]]
 
         batch_input_ids,class_name_target_ids = [],[]
 
@@ -999,7 +1000,7 @@ class LAMMPEFTModel(nn.Module):
                 batch_size, -1, -1
             )  # bsz x s1 x embed_dim
 
-        p_after_texts = [f"{eov} " + prompt + "\n### Assistant:" for prompt in prompt_list]
+        p_after_texts = [f"{eov} " + prompt + "\n### gpt:" for prompt in prompt_list]
         p_after_tokens = self.llama_tokenizer(
             p_after_texts,
             padding="longest", return_length=True, # padding right

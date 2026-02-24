@@ -18,7 +18,7 @@ def parser_args():
         type=str,
         # default='/media/kou/Data1/htc/LAMM/data/LAMM_3dinstruct_10k.json',
         # default='/media/kou/Data1/htc/MYDATA/BenchMark/Task/Task_Reconstruct/WholeTrain/LLM_train_all.json',
-        default='/data/HTC/Data/dataset/Benchmark/Task/Task_Reconstruct/WholeTrain/temp.json',
+        default='/data/HTC/Data/dataset/Benchmark/Task/Task_Reconstruct/WholeTrain/Agent_v1_demo.json',
         # default='/media/kou/Data1/htc/MYDATA/BenchMark/Task/Task_Reconstruct/Train/Classification.json',
         # default='/media/kou/Data1/htc/MYDATA/BenchMark/Task/Task_Reconstruct/Train/ClassificationLong.json',
         # required=True,
@@ -36,7 +36,7 @@ def parser_args():
     parser.add_argument(
         "--max_tgt_len",
         type=int,
-        default=400,
+        default=1200,
         help="max length of post-image texts in LLM input",
     )
     parser.add_argument(

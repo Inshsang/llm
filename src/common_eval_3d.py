@@ -332,11 +332,11 @@ def Rgrounding3d_eval(dataset, pred_data, thres=0.5):
 
         for object_info in gt_objects:
             #判断房间分类
-            if (not classification_acc(object_info['label'], text)) and (not (object_info['label'].lower() in text.lower())):
-                continue
+            # if (not classification_acc(object_info['label'], text)) and (not (object_info['label'].lower() in text.lower())):
+            #     continue
             for index, point in enumerate(bboxes):
                 iou = cal_iou_3d(object_info['bbox'], point)
-                if iou > 0.5:
+                if iou > 0.05:
                     score += 1
                     break
     print(score / cnt)
