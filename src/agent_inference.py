@@ -504,7 +504,9 @@ class Agent3D:
                 bbox_str = str(short_box) # match training data (with spaces)
             else:
                 bbox_str = "[]"
-            obj_lines.append(f"{name}{bbox_str}")
+            # Add index explicitly so the model knows which number to select.
+            obj_lines.append(f"{name} {bbox_str}")
+            # obj_lines.append(f"[{i}]: {name} {bbox_str}")
         
         obj_text = "\n".join(obj_lines)
 
@@ -755,18 +757,7 @@ class Agent3D:
                 # E.g. 20 paintings. We only need maybe 3-5 paintings to choose from.
                 # This gives space for 'sofa' if 'sofa' was not found in candidates or was buried.
                 
-                final_candidates = []
-                # Keep matching objects, but limit dups per name
-                name_counts = {}
-                for c in candidates:
-                    nm = c.get("label") or c.get("name") or "obj"
-                    if name_counts.get(nm, 0) < 5: # Limit 5 instances per class
-                        final_candidates.append(c)
-                        name_counts[nm] = name_counts.get(nm, 0) + 1
-                    else:
-                        others.append(c) # overflow goes back to others
-
-                merged = final_candidates + others
+                merged = candidates + others
                 det_topk = merged[:int(self.args.max_obj)]
         else:
             # Fallback
@@ -953,7 +944,8 @@ class Agent3D:
                bbox_str = str(short_box)
             else:
                bbox_str = "[]"
-            obj_lines.append(f"{name}{bbox_str}")
+            # Add index explicitly so the model knows which number to select.
+            obj_lines.append(f"[{i}]: {name} {bbox_str}")
         obj_text = "\n".join(obj_lines)
 
         # 1. Retrieve Intent Context
