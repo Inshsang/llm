@@ -1600,8 +1600,8 @@ def Train_Agent():
             "Tool=DETECT\n"
             f"Objects(topk={len(det_topk)}):\n{detect_text}\n\n"
             "[AGENT_REVIEW]\n"
-            f"UserQuestion: {user_question}\n\n"
-            "Output ONE JSON only.\n"
+            # f"UserQuestion: {user_question}\n\n"
+            # "Output ONE JSON only.\n"
         )
 
     def make_finish_prompt(user_question: str, tool2_result_text: str) -> str:
@@ -1617,7 +1617,7 @@ def Train_Agent():
             "[TOOL_RESULT]\n"
             f"{simplified_result}\n\n"
             "[AGENT_FINISH]\n"
-            f"UserQuestion: {user_question}\n\n"
+            # f"UserQuestion: {user_question}\n\n"
         )
 
     # ---------- tool simulators (for building supervised conversations) ----------
@@ -1669,7 +1669,8 @@ def Train_Agent():
                     bb = [cx - l/2, cy - h/2, cz - w/2, cx + l/2, cy + h/2, cz + w/2]
                 mins[0] = min(mins[0], bb[0]); mins[1] = min(mins[1], bb[1]); mins[2] = min(mins[2], bb[2])
                 maxs[0] = max(maxs[0], bb[3]); maxs[1] = max(maxs[1], bb[4]); maxs[2] = max(maxs[2], bb[5])
-            out.append({"room_label": g.get("room_label", "unknown"), "bbox": [mins[0], mins[1], mins[2], maxs[0], maxs[1], maxs[2]]})
+            # 保留一位小数
+            out.append({"room_label": g.get("room_label", "unknown"), "bbox": [round(mins[0], 1), round(mins[1], 1), round(mins[2], 1), round(maxs[0], 1), round(maxs[1], 1), round(maxs[2], 1)]})
         return out
 
     def split_room_into_instances(det_topk: List[Dict[str, Any]], base_indices: List[int], max_instances: int = 2) -> List[List[int]]:
@@ -1702,7 +1703,17 @@ def Train_Agent():
 
     # ---------- Generate samples ----------
     sample_id = 0
+    
+    # [Task Control Switch]
+    ENABLE_TASKS = {
+        "VisualGrounding_plus", 
+        "Counting", 
+        "RoomDetection", 
+        "PositionRelation"
+    }
 
+    ENABLE_TASKS = ("PositionRelation")
+    
     for sid in range(0, 460):   #460
         sid_str = str(sid)
         pcl_path = "scene/" + sid_str + ".npy"
@@ -1718,7 +1729,7 @@ def Train_Agent():
         # 1) VisualGrounding_plus
         # -----------------------
         uniq_idxs = unique_name_indices(det_topk)
-        if len(uniq_idxs) >= 1:
+        if "VisualGrounding_plus" in ENABLE_TASKS and len(uniq_idxs) >= 1:
             vg_idx = random.choice(uniq_idxs)
             vg_name = (det_topk[vg_idx].get("name", "") or det_topk[vg_idx].get("label", "") or "").lower()
             vg_name_norm = norm(vg_name)
@@ -1755,10 +1766,12 @@ def Train_Agent():
         # -----------------------
         # 2) Counting
         # -----------------------
-        try:
-            gt_count = GT_Counting[sid]  # dict: {class: num} (if available)
-        except Exception:
-            gt_count = None
+        gt_count = None
+        if "Counting" in ENABLE_TASKS:
+            try:
+                gt_count = GT_Counting[sid]  # dict: {class: num} (if available)
+            except Exception:
+                gt_count = None
 
         if isinstance(gt_count, dict) and len(gt_count) > 0:
             keys = list(gt_count.keys())
@@ -1843,74 +1856,188 @@ def Train_Agent():
         # 3) RoomDetection (ALL rooms, possibly multiple instances per type)
         # -----------------------
         # Always generate (doesn't rely on GT_ROOM), because the training signal is index grouping + union.
-        user_q = "Locate the locations of every room within the scene."
-
-        intent_ans = {
-            "stage": "intent",
-            "task": "RoomDetection",
-            "focus": {"target": "", "A": "", "B": ""},
-        }
-
-        room_groups = []
-        # Build groups per room label; allow multiple instances by splitting indices into clusters
-        for room_label in ROOM_SPACE:
-            fk = [norm(x) for x in (ROOM_HINTS.get(room_label, []) or []) if x]
-            base = find_indices_by_keywords(det_topk, fk)
-
-            # if too few, fallback to some generic large objects (still 2~8)
-            if len(base) < 2:
-                base = list(range(min(4, len(det_topk))))
-
-            # split into multiple instances (best-effort)
-            inst_groups = split_room_into_instances(det_topk, base, max_instances=2)
-            for g in inst_groups:
-                g = g[:8]
-                if len(g) >= 2:
-                    room_groups.append({"room_label": room_label, "indices": g})
-
-        # Ensure at least one group
-        if not room_groups:
-            room_groups = [{"room_label": "livingroom", "indices": list(range(min(4, len(det_topk))))}]
-
-        review_ans = {
-            "stage": "review",
-            "summary": "Group objects for each room instance and compute unions to localize every room.",
-            "selected_object_indices": [],
-            "room_groups": room_groups,
-            "next_tool": {"tool": "BBOX_UNION", "args": {"groups": room_groups}},
-        }
-
-        # tool2 union per group -> produce ALL room bboxes
-        union_out = tool_union_groups(det_topk, room_groups)
-        # Build final answer (one per sentence). Keep compact and parse-friendly.
-        final_lines = []
-        for item in union_out:
-            lbl = item.get("room_label", "unknown")
-            bbox = item.get("bbox", None)
-            bb = [round(x, 2) for x in bbox] if bb is not None else None
-            if bb is None:
-                continue
-            final_lines.append(f"{lbl} {bb}")
-        final_text = "\n".join(final_lines) if final_lines else "unknown"
-
-        tool2_text = "Tool=BBOX_UNION\n" + "\n".join([f"{x['room_label']}{x['bbox']}" for x in union_out])
-
-        conversations = [
-            {"from": "human", "value": make_intent_prompt(user_q)},
-            {"from": "gpt", "value": json.dumps(intent_ans, ensure_ascii=False)},
-            {"from": "human", "value": make_review_prompt(user_q, det_topk)},
-            {"from": "gpt", "value": json.dumps(review_ans, ensure_ascii=False)},
-            {"from": "human", "value": make_finish_prompt(user_q, tool2_text)},
-            {"from": "gpt", "value": final_text},
-        ]
-        outjson.append(getsinglejson(sid_str, str(sample_id), pcl_path, conversations, "Agent3d"))
-        sample_id += 1
+        if "RoomDetection" in ENABLE_TASKS:
+            user_q = "Locate the locations of every room within the scene."
+        
+            # Load Ground Truth rooms for the current scene (using sid_str)
+            # Load Ground Truth rooms for the current scene (using sid_str)
+            # Assuming GT_ROOM is a dict {sid: {room_name: bbox, ...}}
+            # Or a list where index corresponds to scene. But earlier code uses `loading`.
+            # Let's inspect `Train_RoomDetection` or `getanswerRoomDe` logic.
+            # In Train_RoomDetection: Q, A, GT, result = filepath('RoomDetection'); Question, Answer, GT = loading(Q, A, GT)
+            # GT is from `loading`.
+            
+            # Let's try to get GT rooms for this scene
+            gt_rooms_scene = {}
+            # GT_ROOM loaded above using `loading` might be Dict[str, Dict] where key is scene_id
+            if sid_str in GT_ROOM:
+                 gt_rooms_scene = GT_ROOM[sid_str]
+            elif int(sid_str) in GT_ROOM:
+                 gt_rooms_scene = GT_ROOM[int(sid_str)]
+            
+            intent_ans = {
+                "stage": "intent",
+                "task": "RoomDetection",
+                "focus": {"target": "", "A": "", "B": ""},
+            }
+    
+            room_groups = []
+            
+            final_room_bboxes = [] # List of {"room_label":..., "bbox":...}
+            
+            # Iterate over GT rooms for this scene
+            # gt_rooms_scene is likely { "bedroom": [x,y,z,l,w,h], "bathroom": ... }
+            # Note: distinct instances might be handled by keys like "bedroom", "bedroom (1)"? 
+            # Let's check `getanswerRoomDe`: for name,bbox in oneGT.items(): ...
+            
+            if gt_rooms_scene:
+                for r_name, r_bbox in gt_rooms_scene.items():
+                    # Clean room name (remove possible instance suffixes if any, assuming standard names)
+                    # But actually we want the label from ROOM_SPACE.
+                    # r_name might be "bedroom", "kitchen", etc.
+                    
+                    # Check if r_name is valid room type
+                    valid_label = "unknown"
+                    for space in ROOM_SPACE:
+                        if space in r_name.lower():
+                            valid_label = space
+                            break
+                    if valid_label == "unknown":
+                        continue # Skip unknown rooms
+                    
+                    
+                    # Let's safely handle bbox conversion
+                    # For polygon points (list of dicts), length varies (e.g. 4, 6, 8 points)
+                    # We need to detect if it is a list of dicts or a list of numbers.
+                    final_bbox = r_bbox
+                    if isinstance(r_bbox, list) and len(r_bbox) > 0 and isinstance(r_bbox[0], dict):
+                         try:
+                             final_bbox = point2box(r_bbox)
+                         except Exception as e:
+                             # print(f"point2box failed for {valid_label}: {e}")
+                             continue
+                    
+                    # Check if final_bbox is valid [cx, cy, cz, l, w, h]
+                    if not isinstance(final_bbox, list) or len(final_bbox) != 6 or isinstance(final_bbox[0], dict):
+                         # If still dicts or wrong length, skip
+                         continue
+                    
+                    final_room_bboxes.append({"room_label": valid_label, "bbox": final_bbox})
+                    
+                    # For Review step: Find objects inside this GT bbox
+                    # Simple check: object center inside room bbox
+                    idxs_in_room = []
+                    for idx, obj in enumerate(det_topk):
+                         obj_bb = get_bbox(obj)
+                         if not obj_bb: continue
+                         # Check center
+                         cx, cy, cz = obj_bb[0], obj_bb[1], obj_bb[2]
+                         # Room bbox: [cx, cy, cz, l, w, h]
+                         # Ensure final_bbox items are floats (sometimes they could be dicts if point2box failed weirdly or data structure issue)
+                         if isinstance(final_bbox, dict):
+                             # If point2box returned a dict or it wasn't converted
+                             continue
+                         
+                         try:
+                            rcx, rcy, rcz, rl, rw, rh = [float(x) for x in final_bbox]
+                            if (abs(cx - rcx) <= rl/2) and (abs(cy - rcy) <= rh/2) and (abs(cz - rcz) <= rw/2):
+                                idxs_in_room.append(idx)
+                         except Exception as e:
+                            # print(f"Error checking bbox inclusion: {e}")
+                            continue
+                    
+                    # If no objects found (unlikely), pick closest? Or just random fallback?
+                    # If Room is empty of detections, we might pick nothing or just "0".
+                    if not idxs_in_room:
+                         # Fallback: pick objects matching keywords
+                         fk = [norm(x) for x in (ROOM_HINTS.get(valid_label, []) or []) if x]
+                         idxs_in_room = find_indices_by_keywords(det_topk, fk)
+                    
+                    if not idxs_in_room:
+                         idxs_in_room = [0] # Last resort
+                    
+                    # Cap at 8 for content length
+                    idxs_in_room = idxs_in_room[:8]
+                    
+                    room_groups.append({"room_label": valid_label, "indices": idxs_in_room})
+    
+            else:
+                # Fallback if no GT found (should not happen if data is consistent)
+                 room_groups = [{"room_label": "livingroom", "indices": list(range(min(4, len(det_topk))))}]
+                 final_room_bboxes = [] # No result
+    
+            review_ans = {
+                "stage": "review",
+                "summary": "Group objects for each room instance and compute unions to localize every room.",
+                "selected_object_indices": [],
+            }
+    
+            # tool2 union per group -> produce ALL room bboxes
+            # union_out = tool_union_groups(det_topk, room_groups)
+            
+            # override union_out with GT based bboxes
+            union_out = final_room_bboxes
+    
+            # Build final answer (one per sentence). Keep compact and parse-friendly.
+            final_lines = []
+            for item in union_out:
+                lbl = item.get("room_label", "unknown")
+                bbox = item.get("bbox", None)
+                
+                # Ensure bbox is a list of numbers
+                if bbox is not None and isinstance(bbox, list) and len(bbox) == 6:
+                    try:
+                        # Filter out any non-numeric items or dicts
+                        safe_bbox = []
+                        for x in bbox:
+                            if isinstance(x, (int, float)):
+                                safe_bbox.append(float(x))
+                            elif isinstance(x, str):
+                                safe_bbox.append(float(x))
+                            else:
+                                raise ValueError("Not a number")
+                        
+                        bb = [round(x, 2) for x in safe_bbox]
+                    except (ValueError, TypeError):
+                        bb = None
+                else:
+                    bb = None
+    
+                if bb is None:
+                    continue
+                final_lines.append(f"{lbl} {bb}")
+            final_text = "\n".join(final_lines) if final_lines else "unknown"
+    
+            # tool2_text construction needs to be safe as well
+            tool2_parts = ["Tool=BBOX_UNION"]
+            for x in union_out:
+                lbl = x.get('room_label')
+                bbox = x.get('bbox')
+                if not isinstance(bbox, list): continue
+                try:
+                     b_rounded = [round(float(z), 2) for z in bbox]
+                     tool2_parts.append(f"{lbl}{b_rounded}")
+                except:
+                     continue
+            
+            tool2_text = "\n".join(tool2_parts)
+    
+            conversations = [
+                {"from": "human", "value": make_intent_prompt(user_q)},
+                {"from": "gpt", "value": json.dumps(intent_ans, ensure_ascii=False)},
+                {"from": "human", "value": make_review_prompt(user_q, det_topk)},
+                {"from": "gpt", "value": json.dumps(review_ans, ensure_ascii=False)},
+                {"from": "human", "value": make_finish_prompt(user_q,'')},
+                {"from": "gpt", "value": final_text},
+            ]
+            outjson.append(getsinglejson(sid_str, str(sample_id), pcl_path, conversations, "Agent3d"))
+            sample_id += 1
 
         # -----------------------
         # 4) PositionRelation (DETECT -> REL_DIR -> FINISH)
         # -----------------------
         uniq_idxs = unique_name_indices(det_topk)
-        if len(uniq_idxs) >= 2:
+        if "PositionRelation" in ENABLE_TASKS and len(uniq_idxs) >= 2:
             a_idx, b_idx = random.sample(uniq_idxs, 2)
 
             a_name = (det_topk[a_idx].get("name", "") or det_topk[a_idx].get("label", "") or "").lower()
@@ -2002,13 +2129,8 @@ def Train_Agent():
                 }
 
                 # 4) tool2 输出（REL_DIR）：把 qid/flip 给 FINISH
-                tool2_text = (
-                    "Tool=REL_DIR\n"
-                    f"A_idx={a_idx}\n"
-                    f"B_idx={b_idx}\n"
-                    f"qid={qid}\n"
-                    f"flip={flip}\n"
-                )
+                # user request: tool2_text output convert to complete sentence
+                tool2_text = correct_ans_text
 
                 # 5) FINISH 的监督答案：输出完整句子（或者也可以带上选项 A/B/C/D，视训练目标而定）
                 # 这里保持输出自然语言句子，这通常是 CoT 的最后一步。或者可以改成 "The answer is (X). Correct Sentence."

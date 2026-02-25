@@ -220,13 +220,34 @@ class GeomTool3D:
         w = (zmax - zmin)
         return [cx, cy, cz, l, w, h]
 
-    def relation_4way(self, bboxA: List[float], bboxB: List[float]) -> str:
-        ax, ay, _ = self._center(bboxA)
-        bx, by, _ = self._center(bboxB)
-        dx, dy = bx - ax, by - ay
-        if abs(dx) >= abs(dy):
-            return 'right' if dx > 0 else 'left'
-        return 'above' if dy > 0 else 'below'
+    def relation_4way(self, bboxA: List[float], bboxB: List[float]) -> Tuple[int, int]:
+        # Match CreatGT.py getdir logic exactly
+        # getdir(p0, p1): p0->A, p1->B
+        pA = self._center(bboxA)
+        pB = self._center(bboxB)
+
+        x0, y0, z0, *_ = pA
+        x1, y1, z1, *_ = pB
+        
+        dis = 0.5
+        
+        # y-up coordinate system assumed?
+        if abs(y0 - y1) > dis and abs(x0 - x1) < dis and abs(z0 - z1) < dis: # up/down
+            if y0 > y1: return (240, 0)
+            elif y0 < y1: return (210, 0)
+        elif abs(y0 - y1) < 2 * dis and abs(x0 - x1) > dis and abs(z0 - z1) < dis: # left/right
+            if x0 > x1: return (60, 0)
+            elif x0 < x1: return (30, 0)
+        elif abs(y0 - y1) < 2 * dis and abs(x0 - x1) < dis and abs(z0 - z1) > dis: # front/back
+            if z0 > z1: return (90, 0)
+            elif z0 < z1: return (120, 0)
+        elif abs(y0 - y1) < 2 * dis and abs(x0 - x1) > dis and abs(z0 - z1) > dis: # diagonal
+            if z0 > z1 and x0 > x1: return (150, 0)
+            elif z0 > z1 and x0 < x1: return (180, 0)
+            elif z0 < z1 and x0 > x1: return (180, 1) # flip -> 150 for B,A
+            elif z0 < z1 and x0 < x1: return (150, 1) # flip -> 180 for B,A
+        
+        return (0, -1)
 
     def union_bbox(self, bboxes: List[List[float]]) -> Optional[List[float]]:
         if not bboxes:
@@ -278,6 +299,18 @@ class Agent3D:
         self.det_tool = det_tool
         self.device = device
         self.geom = geom or GeomTool3D()
+        
+        # Load PositionRelation templates
+        self.pos_rel_templates = {}
+        template_path = "/data/HTC/Data/dataset/Benchmark/Task/Template/A_PositionRelation.json"
+        if os.path.exists(template_path):
+            try:
+                with open(template_path, "r") as f:
+                    self.pos_rel_templates = json.load(f)
+            except Exception as e:
+                print(f"[Warning] Failed to load PositionRelation templates: {e}")
+        else:
+             print(f"[Warning] PositionRelation templates not found at {template_path}")
 
     @staticmethod
     def _norm(s: str) -> str:
@@ -302,13 +335,44 @@ class Agent3D:
                         start = None
 
         out: List[Dict[str, Any]] = []
+        
+        # 尝试修复截断的 JSON
+        if not spans and '{' in text:
+             # 如果没有找到完整闭合的 JSON，尝试找到最后一个 { 并补全
+            last_open = text.rfind('{')
+            # 或者尝试从最开始的 {
+            first_open = text.find('{')
+            if first_open != -1:
+                # 简单尝试补全右括号:
+                # 统计缺多少个 }
+                candidate = text[first_open:]
+                opens = candidate.count('{')
+                closes = candidate.count('}')
+                fixed = candidate + '}' * (opens - closes)
+                try:
+                    js = json.loads(fixed)
+                    if isinstance(js, dict):
+                        out.append(js)
+                except:
+                    pass
+
         for s in spans:
             try:
                 js = json.loads(s)
                 if isinstance(js, dict):
                     out.append(js)
             except Exception:
-                continue
+                 # 尝试宽松修复 (例如结尾有多余逗号)
+                try:
+                    import ast
+                    # ast.literal_eval 有时能处理一些非标准格式，但对 JSON 不一定好用
+                    # 这里尝试简单的字符串清理
+                    if s.endswith(",}"):
+                        s_fixed = s[:-2] + "}"
+                        js = json.loads(s_fixed)
+                        out.append(js)
+                except:
+                    continue
         return out
 
     @classmethod
@@ -384,13 +448,13 @@ class Agent3D:
             obj_list=obj_list,
             list_of_objpoints=[],
             task_type="Agent3d",
-            max_length=1200,
+            max_length=200,
             top_p=1.0,
             temperature=1e-5,
         )
         raw = out[0] if isinstance(out, list) and out else str(out)
 
-        print("intent",raw)
+        # print("intent",raw)
 
         js = self._extract_json_by_stage(raw, stage="intent")
 
@@ -411,7 +475,7 @@ class Agent3D:
             },
             "tool_plan": [
                 {"tool": "DETECT", "args": {"topk": 20}},
-                {"tool": "BBOX_UNION", "args": {}},
+                {"tool": "FINISH", "args": {}},
             ],
             "raw": raw,
         }
@@ -424,8 +488,8 @@ class Agent3D:
         """
         让 MLLM 真正看到 point cloud + obj proposals（obj_list 顺序对齐 det_topk），输出：
         - summary
-        - need_tool2（Count/Room 必须 true；VG/REL 默认 false）
-        - selected_object_indices（VG:1个；REL:2个；Room:2~8个；Count:任意个）
+        - need_tool2（Count 必须 true；Room/VG/REL 默认 false）
+        - selected_object_indices（VG:1个；REL:2个；Count:任意个）
         """
         # Format detected objects similar to training data.
         obj_lines = []
@@ -459,8 +523,8 @@ class Agent3D:
             "Tool=DETECT\n"
             f"Objects(topk={len(det_topk)}):\n{obj_text}\n\n"
             "[AGENT_REVIEW]\n"
-            f"UserQuestion: {query}\n\n"
-            "Output ONE JSON only.\n"
+            # f"UserQuestion: {query}\n\n"
+            # "Output ONE JSON only.\n"
         )
 
         # 3. Combine: intent_prompt + response + review_context
@@ -498,7 +562,7 @@ class Agent3D:
             obj_list=det_topk,
             list_of_objpoints=[],              # scene tasks 默认空即可（与 inference_3d 一致）
             task_type=task_type,
-            max_length=1200,   # 减少续写 Schema 的概率
+            max_length=600,   # 减少续写 Schema 的概率
             top_p=1.0,
             temperature=1e-5,
         )
@@ -517,10 +581,8 @@ class Agent3D:
         review = {
             "stage": "review",
             "summary": "",
-            "need_tool2": task_type in {"Counting", "RoomDetection"},
+            "need_tool2": task_type in {"Counting"},
             "selected_object_indices": [],
-            "room_groups": [],
-            "next_tool": {"tool": "FINISH"},
             "raw": raw,
             "parse_error": False,
         }
@@ -530,27 +592,14 @@ class Agent3D:
             if isinstance(js.get("need_tool2", None), bool):
                 review["need_tool2"] = js["need_tool2"]
             review["selected_object_indices"] = self._safe_int_list(js.get("selected_object_indices", []))
-            # room_groups 解析与裁剪
-            rg = js.get("room_groups", [])
-            if isinstance(rg, list):
-                clean_groups = []
-                for g in rg:
-                    if not isinstance(g, dict):
-                        continue
-                    label = (g.get("room_label") or "").strip() or "livingroom"
-                    idxs = self._safe_int_list(g.get("indices", []))
-                    if len(idxs) < 2:
-                        continue
-                    clean_groups.append({"room_label": label, "indices": idxs[:8]})
-                review["room_groups"] = clean_groups
-            nt = js.get("next_tool", {})
-            if isinstance(nt, dict) and isinstance(nt.get("tool", None), str):
-                review["next_tool"] = {"tool": nt.get("tool"), "args": nt.get("args", {})}
+            
+            review["next_tool"] = {"tool": "FINISH"}
+
         else:
             review["parse_error"] = True
 
-        # 固定预算：Count/Room 必须 tool2；VG/REL 不执行 tool2
-        if task_type in {"Counting", "RoomDetection"}:
+        # 固定预算：Count 必须 tool2；VG/REL/Room 不执行 tool2
+        if task_type in {"Counting"}:
             review["need_tool2"] = True
         else:
             review["need_tool2"] = False
@@ -560,29 +609,16 @@ class Agent3D:
         review["selected_object_indices"] = [i for i in review["selected_object_indices"] if 0 <= i < k]
 
         # 强制校正 next_tool（与任务一致）
-        if task_type == "RoomDetection":
-            review["next_tool"] = {"tool": "BBOX_UNION", "args": {}}
-        elif task_type == "Counting":
+        if task_type == "Counting":
             review["next_tool"] = {"tool": "COUNT", "args": {}}
         elif task_type == "PositionRelation":
-            review["next_tool"] = {"tool": "REL_DIR", "args": {}}
+            indices = review["selected_object_indices"]
+            args = {}
+            if len(indices) >= 1: args["A_idx"] = indices[0]
+            if len(indices) >= 2: args["B_idx"] = indices[1]
+            review["next_tool"] = {"tool": "REL_DIR", "args": args}
         else:
             review["next_tool"] = {"tool": "FINISH", "args": {}}
-
-        # 如果 RoomDetection/Counting 解析失败，尝试从 raw 中提取数字作兜底
-        if task_type == "RoomDetection" and not review["room_groups"]:
-            import re
-            nums = []
-            try:
-                nums = [int(x) for x in re.findall(r"\d+", raw)]
-            except Exception:
-                nums = []
-            uniq = []
-            for v in nums:
-                if 0 <= v < k and v not in uniq:
-                    uniq.append(v)
-            if len(uniq) >= 2:
-                review["room_groups"] = [{"room_label": intent.get("focus", {}).get("room_type", "") or "livingroom", "indices": uniq[:8]}]
 
         if task_type == "Counting" and not review["selected_object_indices"]:
             import re
@@ -617,11 +653,7 @@ class Agent3D:
                 return "0", trace
 
         if task_type == "PositionRelation":
-            if text.strip() in set(self.REL_SPACE):
-                return text, trace
-            trace["applied"] = True
-            trace["reason"] = "invalid_relation_fallback_left"
-            return "left", trace
+            return text.strip(), trace
 
         if task_type in {"VisualGrounding_plus", "RoomDetection"}:
             if "[" in text and "]" in text:
@@ -674,33 +706,70 @@ class Agent3D:
 
         # Strategy:
         # - Counting/Room: prioritize RECALL (filter by keyword).
-        # - VG/Relation: prioritize CONTEXT/ORDER (natural top-k).
-        if task_inferred in ["Counting", "RoomDetection"]:
+        # - VG/Relation: prioritize CONTEXT/ORDER (natural top-k), BUT we should still try to include the relevant objects if possible
+        if task_inferred in ["Counting", "RoomDetection", "PositionRelation", "VisualGrounding_plus"]:
             keywords = []
             focus = intent.get("focus", {})
             if focus.get("target"):
                 keywords.append(focus["target"])
+            if task_inferred == "PositionRelation":
+                if focus.get("A"): keywords.append(focus["A"])
+                if focus.get("B"): keywords.append(focus["B"])
+
             if task_type == "RoomDetection":
                 rt = focus.get("room_type", "")
                 keywords.extend(self.ROOM_HINTS.get(rt, []) or [])
                 keywords.extend(focus.get("focus_keywords", []) or [])
 
             # Simple keyword matching to find all potential targets
+            # We want to keep the original order mostly, but ensure candidates are present
             candidates = []
-            for obj in all_objs:
-                name = self._norm(obj.get("name", "") or obj.get("label", "") or "")
-                for k in keywords:
-                    k_norm = self._norm(str(k))
-                    if k_norm and k_norm in name:
-                        candidates.append(obj)
-                        break
+            others = []
             
-            if candidates:
-                det_topk = candidates[:int(self.args.max_obj)]
+            # Helper to check match
+            def is_match(obj, kws):
+                name = self._norm(obj.get("name", "") or obj.get("label", "") or "")
+                for k in kws:
+                    k_norm = self._norm(str(k))
+                    # Exact match or very close containment to avoid "paint" matching "painting" too broadly locally
+                    # But broadly enough to catch "chair" in "armchair"
+                    if k_norm and (k_norm == name or k_norm in name or name in k_norm):
+                        return True
+                return False
+
+            if not keywords:
+                 det_topk = all_objs[:int(self.args.max_obj)]
             else:
-                det_topk = all_objs[:int(self.args.max_obj)]
+                for obj in all_objs:
+                    # Only promote logic:
+                    # If we just promote everything matching keywords, we might fill the buffer with 20 chairs
+                    # if the keyword is 'chair'. 
+                    # We should prioritize, but maybe limit the number of SAME label objects promoted?
+                    if is_match(obj, keywords):
+                        candidates.append(obj)
+                    else:
+                        others.append(obj)
+                
+                # DEDUPLICATION/DIVERSITY HACK:
+                # If 'candidates' contains too many of the same object name, trim them to let other objects in.
+                # E.g. 20 paintings. We only need maybe 3-5 paintings to choose from.
+                # This gives space for 'sofa' if 'sofa' was not found in candidates or was buried.
+                
+                final_candidates = []
+                # Keep matching objects, but limit dups per name
+                name_counts = {}
+                for c in candidates:
+                    nm = c.get("label") or c.get("name") or "obj"
+                    if name_counts.get(nm, 0) < 5: # Limit 5 instances per class
+                        final_candidates.append(c)
+                        name_counts[nm] = name_counts.get(nm, 0) + 1
+                    else:
+                        others.append(c) # overflow goes back to others
+
+                merged = final_candidates + others
+                det_topk = merged[:int(self.args.max_obj)]
         else:
-            # VisualGrounding_plus / PositionRelation
+            # Fallback
             det_topk = all_objs[:int(self.args.max_obj)]
 
         if not det_topk:
@@ -754,13 +823,60 @@ class Agent3D:
             bbB = det_topk[selected[1]].get("BoundingBox") if selected[1] < len(det_topk) else None
             
             # Align format
-            tool_res_str = f"Tool=REL_DIR\nA_idx={selected[0]}\nB_idx={selected[1]}"
+            # In training data (CreatGT.py), tool2_text is JUST the sentence.
+            final_rel_sentence = "unknown"
 
             if isinstance(bbA, list) and isinstance(bbB, list):
-                rel = self.geom.relation_4way(bbA, bbB)
-                # We inject the calculated relation hint so MLLM can separate style from fact
-                # (Training data might not have the answer in tool result, but here we are the tool)
-                tool_res_str += f"\nRelationHint={rel}"
+                qid, flip = self.geom.relation_4way(bbA, bbB)
+                
+                # If relation_4way returns 0 (unknown) or Up/Down (210/240) which CreatGT sometimes skips,
+                # we still need to provide an answer.
+                # If strictly 0, fallback to 'left' (60) to avoid "unknown" as per user request.
+                if qid == 0:
+                     qid = 60 # Default fallback
+                
+                if qid > 0 and self.pos_rel_templates:
+                    import random
+                    
+                    # Try to find a valid template
+                    # The CreatGT logic uses random between 0-29 relative to base qid
+                    # But keys might be missing. We iterate to be safe.
+                    tpl = ""
+                    # First try random offset
+                    random_offset = random.randint(0, 29)
+                    tpl = self.pos_rel_templates.get(str(qid + random_offset), "")
+                    
+                    # Fallback strategies if random failed
+                    if not tpl:
+                        # Try base qid
+                        tpl = self.pos_rel_templates.get(str(qid), "")
+                    
+                    if not tpl:
+                        # Try searching nearby keys
+                        for i in range(30):
+                            tpl = self.pos_rel_templates.get(str(qid + i), "")
+                            if tpl: break
+
+                    if tpl:
+                        nameA = det_topk[selected[0]].get("label") or det_topk[selected[0]].get("name") or "object"
+                        nameB = det_topk[selected[1]].get("label") or det_topk[selected[1]].get("name") or "object"
+                        
+                        if flip:
+                            final_rel_sentence = tpl.replace("C1", nameB).replace("C2", nameA)
+                        else:
+                            final_rel_sentence = tpl.replace("C1", nameA).replace("C2", nameB)
+                
+                # If template lookup failed but valid qid, create a simple sentence
+                if final_rel_sentence == "unknown":
+                    nameA = det_topk[selected[0]].get("label") or det_topk[selected[0]].get("name") or "object"
+                    nameB = det_topk[selected[1]].get("label") or det_topk[selected[1]].get("name") or "object"
+                    if qid in [60, 30]: # left/right
+                         final_rel_sentence = f"{nameA} is next to {nameB}."
+                    else:
+                         final_rel_sentence = f"{nameA} is near {nameB}."
+            
+            # The tool result is just the sentence, no metadata
+            tool_res_str = final_rel_sentence
             
             final_text = self.mllm_finish(task_inferred, query, tool_res_str, pcl_paths, det_topk, intent=intent, review=review)
             text = final_text
@@ -798,31 +914,17 @@ class Agent3D:
             text = final_text
 
         elif task_inferred == "RoomDetection":
-            groups = review.get("room_groups", []) or []
-            if not groups:
-                idxs = selected if selected else list(range(min(4, len(det_topk))))
-                room_label = intent.get("focus", {}).get("room_type", "") or "livingroom"
-                groups = [{"room_label": room_label, "indices": idxs}]
-
-            union_results = []
-            results_str = ""
-            for g in groups:
-                idxs = [i for i in (g.get("indices", []) or []) if 0 <= i < len(det_topk)]
-                bboxes = [det_topk[i].get("BoundingBox") for i in idxs if isinstance(det_topk[i].get("BoundingBox"), list)]
-                uni = self.geom.union_bbox(bboxes) if bboxes else None
-                union_results.append({
-                    "room_label": g.get("room_label", "room"),
-                    "indices": idxs,
-                    "union_bbox": uni,
-                })
-                # Format: label [x, y, z, l, w, h]
-                if uni:
-                    s_uni = [round(x, 2) for x in uni]
-                    results_str += f"{g.get('room_label', 'room')} {str(s_uni)}\n"
-
-            # Pass structured text instead of JSON to avoid confusing the LLM
-            tool_res_str = f"Tool=BBOX_UNION\nUnionResults:\n{results_str}"
-            final_text = self.mllm_finish(task_inferred, query, tool_res_str, pcl_paths, det_topk, intent=intent, review=review)
+            # Just call FINISH tool with no groups since we are not using them anymore
+            # And rely on MLLM to finish the task
+            tool_res_str = "Tool=FINISH\n"
+            
+            # Since we removed the logic to compute union from indices, we just pass the tool name
+            # Ideally the MLLM in 'finish' stage should have the knowledge or the tool should return something
+            # But based on user request "delete inference part room_groups and next_tool args",
+            # we imply the finish stage will handle generation or we just return a placeholder.
+            
+            # If the goal is to output "unknown" or let MLLM hallucinate/retrieve from memory:
+            final_text = self.mllm_finish(task_inferred, query, " ", pcl_paths, det_topk, intent=intent, review=review)
             text = final_text
         
         # Reflection: one-shot validation + fallback
@@ -864,8 +966,8 @@ class Agent3D:
             "Tool=DETECT\n"
             f"Objects(topk={len(obj_list)}):\n{obj_text}\n\n"
             "[AGENT_REVIEW]\n"
-            f"UserQuestion: {user_question}\n\n"
-            "Output ONE JSON only.\n"
+            # f"UserQuestion: {user_question}\n\n"
+            # "Output ONE JSON only.\n"
         )
         review_output_str = review.get("raw", "") if review else ""
 
@@ -873,8 +975,7 @@ class Agent3D:
         finish_context_user = (
             "[TOOL_RESULT]\n" +
             f"{simplified}\n\n" +
-            "[AGENT_FINISH]\n" +
-            f"UserQuestion: {user_question}\n\n"
+            "[AGENT_FINISH]\n" 
         )
 
         # 4. Concatenate History
@@ -904,7 +1005,7 @@ class Agent3D:
             obj_list=obj_list[:self.args.max_obj],
             list_of_objpoints=[],
             task_type="Agent3d",
-            max_length=1200,
+            max_length=1000,
             top_p=1.0,
             temperature=1e-5,
         )
@@ -918,7 +1019,7 @@ class Agent3D:
 # -------------------------
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--task_type', type=str, default='RoomDetection',
+    parser.add_argument('--task_type', type=str, default='PositionRelation',
                         choices=['VisualGrounding_plus', 'Counting', 'RoomDetection', 'PositionRelation'])
     parser.add_argument('--base-data-path', type=str, default='/data/HTC/Data/dataset/Benchmark/data')
     # Default to repo-local answers/ to avoid writing outside workspace (cwd-dependent).
@@ -930,7 +1031,7 @@ def parse_args():
     parser.add_argument('--encoder_ckpt_path', type=str,
                         default='/data/HTC/Data/model_zoo/epcl_ckpt/epcl_scannet_vit-L-14_256tokens_latest.pth')
     parser.add_argument('--vicuna_ckpt_path', type=str, default='/data/HTC/Data/model_zoo/vicuna-7b/Vicuna_7B_v0')
-    parser.add_argument('--delta_ckpt_path', type=str, default='/data/HTC/Data/model_zoo/llm_exe/agent_demo/pytorch_model.pt')
+    parser.add_argument('--delta_ckpt_path', type=str, default='/data/HTC/Data/model_zoo/llm_exe/agent_v2_pos/pytorch_model.pt')
 
     parser.add_argument('--train_stage', type=int, default=2)
     parser.add_argument('--stage', type=int, default=2)
@@ -1195,7 +1296,7 @@ def main():
                 'id': data_item['id'][0] if isinstance(data_item['id'], list) else data_item['id'],
                 'pcl': pcl_paths,
                 'text': text,
-                'delta_path': args.delta_ckpt_path,
+                # 'delta_path': args.delta_ckpt_path,
             }
             fout.write(json.dumps(ans) + '\n')
             fout.flush()
