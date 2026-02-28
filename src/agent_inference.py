@@ -151,7 +151,75 @@ class DetectionTool3D:
 
     def _lazy_load(self):
         if self._data is None:
-            self._data = json.load(open(self.detection_path, 'r'))
+            # Detection.json in this repo may be:
+            # 1) a single JSON object (dict/list)
+            # 2) JSON Lines (one JSON dict per line)
+            # 3) multiple JSON objects concatenated together (causes JSONDecodeError: Extra data)
+            # We support all via a streaming raw decoder fallback.
+
+            def _load_concatenated_json_objects(path: str):
+                decoder = json.JSONDecoder()
+                merged: Dict[str, Any] = {}
+
+                # Chunked reading to avoid loading huge files at once.
+                buffer = ""
+                with open(path, "r") as f:
+                    while True:
+                        chunk = f.read(1024 * 1024 * 4)  # 4MB
+                        if not chunk:
+                            break
+                        buffer += chunk
+
+                        while True:
+                            # Skip leading whitespace
+                            i = 0
+                            blen = len(buffer)
+                            while i < blen and buffer[i].isspace():
+                                i += 1
+                            if i:
+                                buffer = buffer[i:]
+                                blen = len(buffer)
+
+                            if not buffer:
+                                break
+
+                            try:
+                                obj, end = decoder.raw_decode(buffer)
+                            except json.JSONDecodeError:
+                                # Need more data
+                                break
+
+                            if isinstance(obj, dict):
+                                merged.update(obj)
+                            else:
+                                # If it's a list or other structure, just return it as-is.
+                                return obj
+
+                            buffer = buffer[end:]
+
+                # Final drain for any remaining parsable JSON
+                buffer = buffer.lstrip()
+                while buffer:
+                    try:
+                        obj, end = decoder.raw_decode(buffer)
+                    except json.JSONDecodeError:
+                        break
+                    if isinstance(obj, dict):
+                        merged.update(obj)
+                    else:
+                        return obj
+                    buffer = buffer[end:].lstrip()
+
+                return merged
+
+            with open(self.detection_path, 'r') as f:
+                try:
+                    self._data = json.load(f)
+                    return
+                except json.JSONDecodeError:
+                    pass
+
+            self._data = _load_concatenated_json_objects(self.detection_path)
 
     def proposals_for_scene(self, pcl_path: str, index: int) -> List[Dict[str, Any]]:
         """
@@ -454,7 +522,7 @@ class Agent3D:
         )
         raw = out[0] if isinstance(out, list) and out else str(out)
 
-        # print("intent",raw)
+        print("intent",raw)
 
         js = self._extract_json_by_stage(raw, stage="intent")
 
@@ -757,7 +825,45 @@ class Agent3D:
                 # E.g. 20 paintings. We only need maybe 3-5 paintings to choose from.
                 # This gives space for 'sofa' if 'sofa' was not found in candidates or was buried.
                 
-                merged = candidates + others
+                final_candidates = []
+                # Keep matching objects, but limit dups per name
+                name_counts = {}
+                for c in candidates:
+                    nm = c.get("label") or c.get("name") or "obj"
+                    if name_counts.get(nm, 0) < 5: # Limit 5 instances per class
+                        final_candidates.append(c)
+                        name_counts[nm] = name_counts.get(nm, 0) + 1
+                    else:
+                        others.append(c) # overflow goes back to others
+
+                merged = final_candidates + others
+                # FORCE SHUFFLE if mostly identical to avoid "last item bias"? No, keep deterministic.
+                # But ensure we only take the ones we genuinely care about?
+                # Actually, if we have 20 paintings, maybe just take the first few? 
+                # If we fill det_topk with 15 overflow paintings, model gets confused.
+                if len(final_candidates) > 0:
+                     # If we have matches, prioritizing filling det_topk with other distinct objects if possible?
+                     # But 'others' contains the overflow.
+                     # Let's filter 'others' to avoid adding more of the SAME class if we already have 5?
+                     filtered_others = []
+                     for o in others:
+                          nmo = o.get("label") or o.get("name") or "obj"
+                          # If we already have 5 of this class in final_candidates, maybe skip adding more?
+                          if name_counts.get(nmo, 0) >= 5:
+                               continue
+                          filtered_others.append(o)
+                     
+                     # If we run out of objects, we might just have to pad with overflow or leave it smaller.
+                     # But model expects 20? No, model handles variable length.
+                     merged = final_candidates + filtered_others
+                     
+                     # If still need more to reach max_obj, add back some overflow but maybe not all?
+                     if len(merged) < self.args.max_obj:
+                          remaining = self.args.max_obj - len(merged)
+                          # Add back the skipped ones
+                          skipped = [o for o in others if o not in filtered_others]
+                          merged.extend(skipped[:remaining])
+
                 det_topk = merged[:int(self.args.max_obj)]
         else:
             # Fallback
@@ -769,6 +875,91 @@ class Agent3D:
                 return "1"
             return "unknown"
 
+        # Special-case: PositionRelation should IGNORE review-selected indices.
+        # Use Intent focus(A,B) directly, then compute relation from detection bboxes.
+        if task_inferred == "PositionRelation":
+            focus = intent.get("focus", {}) if isinstance(intent, dict) else {}
+            focus_a = str(focus.get("A", "") or "").strip()
+            focus_b = str(focus.get("B", "") or "").strip()
+
+            def _obj_name(o: Dict[str, Any]) -> str:
+                return str(o.get("name", "") or o.get("label", "") or "").strip()
+
+            def _find_matches(objs: List[Dict[str, Any]], keyword: str) -> List[int]:
+                kw = self._norm(keyword)
+                if not kw:
+                    return []
+                hits: List[int] = []
+                for i, o in enumerate(objs):
+                    nm = self._norm(_obj_name(o))
+                    if kw and (kw == nm or kw in nm or nm in kw):
+                        hits.append(i)
+                return hits
+
+            # Prefer matching from det_topk (smaller), fall back to all_objs.
+            # Using det_topk keeps response aligned with the agent's "DETECT topk" idea.
+            search_space = det_topk if det_topk else all_objs
+
+            a_hits = _find_matches(search_space, focus_a)
+            b_hits = _find_matches(search_space, focus_b)
+
+            # Fallback if intent missing or no hits.
+            if not a_hits:
+                a_hits = list(range(len(search_space)))
+            if not b_hits:
+                b_hits = list(range(len(search_space)))
+
+            a_idx = a_hits[0] if a_hits else 0
+            b_idx = b_hits[0] if b_hits else (1 if len(search_space) > 1 else 0)
+            if b_idx == a_idx and len(b_hits) > 1:
+                b_idx = b_hits[1]
+            if b_idx == a_idx and len(search_space) > 1:
+                b_idx = 1 if a_idx == 0 else 0
+
+            objA = search_space[a_idx] if 0 <= a_idx < len(search_space) else {}
+            objB = search_space[b_idx] if 0 <= b_idx < len(search_space) else {}
+            bbA = objA.get("BoundingBox")
+            bbB = objB.get("BoundingBox")
+
+            nameA = focus_a or _obj_name(objA) or "object"
+            nameB = focus_b or _obj_name(objB) or "object"
+
+            qid, flip = (60, 0)  # default to a stable direction
+            if isinstance(bbA, list) and isinstance(bbB, list) and len(bbA) == 6 and len(bbB) == 6:
+                qid, flip = self.geom.relation_4way(bbA, bbB)
+                if qid == 0:
+                    qid, flip = (60, 0)
+
+            # Pick a template if available; otherwise use a simple fallback sentence.
+            tpl = ""
+            if self.pos_rel_templates and qid > 0:
+                # Prefer exact key, then search forward within the usual +[0..29] range.
+                tpl = self.pos_rel_templates.get(str(qid), "")
+                if not tpl:
+                    for off in range(1, 30):
+                        tpl = self.pos_rel_templates.get(str(qid + off), "")
+                        if tpl:
+                            break
+
+            if flip:
+                nameA, nameB = nameB, nameA
+
+            if tpl:
+                return tpl.replace("C1", nameA).replace("C2", nameB).strip()
+
+            rel_map = {
+                30: "right",
+                60: "left",
+                90: "front",
+                120: "behind",
+                150: "front-left",
+                180: "front-right",
+                210: "below",
+                240: "above",
+            }
+            rel = rel_map.get(qid, "near")
+            return f"The {nameA} is to the {rel} of {nameB}."
+
         # Step2: review/select (MULTIMODAL MLLM)
         review = self.mllm_review_multimodal(task_inferred, query, pcl_paths, det_topk, intent)
 
@@ -779,98 +970,8 @@ class Agent3D:
 
         if task_inferred == "Counting":
             # must do tool2 COUNT
-            
-             # Fallback if selected empty
-            if not selected:
-                tgt = intent.get("focus", {}).get("target", "")
-                hits = self._find_by_keywords_fallback(det_topk, [tgt] if tgt else [])
-                selected = hits
-
-            count_val = len(det_topk) if candidates else len(selected)
-            # Align with training data format
-            tool_res_str = f"Tool=COUNT\nTarget={intent.get('focus', {}).get('target', 'object')}\ncount_all={count_val}\nfinal_count={count_val}"
-            
-            # For counting, generally hard logic is preferred for accuracy, 
-            # but to align with training "flow", we pass it through MLLM finish (or hybrid).
-            # Here we let MLLM generate the answer based on the tool result.
-            # final_text = self.mllm_finish(task_inferred, query, tool_res_str, pcl_paths, det_topk, intent=intent, review=review)
-            text = str(count_val) if count_val != 0 else "1"
-
-
-        elif task_inferred == "PositionRelation":
-            if len(selected) != 2:
-                A = intent.get("focus", {}).get("A", "")
-                B = intent.get("focus", {}).get("B", "")
-                a_hits = self._find_by_keywords_fallback(det_topk, [A] if A else [])
-                b_hits = self._find_by_keywords_fallback(det_topk, [B] if B else [])
-                a_idx = a_hits[0] if a_hits else 0
-                b_idx = b_hits[0] if b_hits else (1 if len(det_topk) > 1 else 0)
-                selected = [a_idx, b_idx]
-
-            # Calculate geometric relation
-            # Note: Training data shows Tool=REL_DIR without explicit relation string, 
-            # but often includes context. We simulate the geometric calculation result.
-            bbA = det_topk[selected[0]].get("BoundingBox") if selected[0] < len(det_topk) else None
-            bbB = det_topk[selected[1]].get("BoundingBox") if selected[1] < len(det_topk) else None
-            
-            # Align format
-            # In training data (CreatGT.py), tool2_text is JUST the sentence.
-            final_rel_sentence = "unknown"
-
-            if isinstance(bbA, list) and isinstance(bbB, list):
-                qid, flip = self.geom.relation_4way(bbA, bbB)
-                
-                # If relation_4way returns 0 (unknown) or Up/Down (210/240) which CreatGT sometimes skips,
-                # we still need to provide an answer.
-                # If strictly 0, fallback to 'left' (60) to avoid "unknown" as per user request.
-                if qid == 0:
-                     qid = 60 # Default fallback
-                
-                if qid > 0 and self.pos_rel_templates:
-                    import random
-                    
-                    # Try to find a valid template
-                    # The CreatGT logic uses random between 0-29 relative to base qid
-                    # But keys might be missing. We iterate to be safe.
-                    tpl = ""
-                    # First try random offset
-                    random_offset = random.randint(0, 29)
-                    tpl = self.pos_rel_templates.get(str(qid + random_offset), "")
-                    
-                    # Fallback strategies if random failed
-                    if not tpl:
-                        # Try base qid
-                        tpl = self.pos_rel_templates.get(str(qid), "")
-                    
-                    if not tpl:
-                        # Try searching nearby keys
-                        for i in range(30):
-                            tpl = self.pos_rel_templates.get(str(qid + i), "")
-                            if tpl: break
-
-                    if tpl:
-                        nameA = det_topk[selected[0]].get("label") or det_topk[selected[0]].get("name") or "object"
-                        nameB = det_topk[selected[1]].get("label") or det_topk[selected[1]].get("name") or "object"
-                        
-                        if flip:
-                            final_rel_sentence = tpl.replace("C1", nameB).replace("C2", nameA)
-                        else:
-                            final_rel_sentence = tpl.replace("C1", nameA).replace("C2", nameB)
-                
-                # If template lookup failed but valid qid, create a simple sentence
-                if final_rel_sentence == "unknown":
-                    nameA = det_topk[selected[0]].get("label") or det_topk[selected[0]].get("name") or "object"
-                    nameB = det_topk[selected[1]].get("label") or det_topk[selected[1]].get("name") or "object"
-                    if qid in [60, 30]: # left/right
-                         final_rel_sentence = f"{nameA} is next to {nameB}."
-                    else:
-                         final_rel_sentence = f"{nameA} is near {nameB}."
-            
-            # The tool result is just the sentence, no metadata
-            tool_res_str = final_rel_sentence
-            
-            final_text = self.mllm_finish(task_inferred, query, tool_res_str, pcl_paths, det_topk, intent=intent, review=review)
-            text = final_text
+            # Keep output strictly as an integer string to satisfy downstream validation.
+            text = str(len(selected) if selected else 0)
 
 
         elif task_inferred == "VisualGrounding_plus":
@@ -1057,8 +1158,10 @@ def parse_args():
                         help='Print and record constructed agent prompts (intent stage).')
 
     # detector artifacts
+    # parser.add_argument('--detection_path', type=str,
+    #                     default='/data/HTC/Data/dataset/Benchmark/data/metadata/Detection_0.3_0.01.json')
     parser.add_argument('--detection_path', type=str,
-                        default='/data/HTC/Data/dataset/Benchmark/data/metadata/Detection_0.3_0.01.json')
+                        default='/data/HTC/Data/dataset/Benchmark/Task/GT/Detection.json')
     parser.add_argument('--objpoints_path', type=str,
                         default='/data/HTC/Project/Point-BERT/data/ModelNet/modelnet40_normal_resampled/my_test_1024pts_fps.dat')
 
@@ -1089,6 +1192,8 @@ def main():
         # Pre-warm CUDA to avoid initialization overhead during model loading
         torch.randn(1, device=device)
 
+
+    dataloader = load_3Deval_dataset(args.base_data_path, args.task_type, mode='common', batch_size=args.bs)
     model = LAMMPEFTModel(**args.__dict__)
     # Use mmap=True for potentially faster loading
     delta_ckpt = torch.load(args.delta_ckpt_path, map_location='cpu', mmap=True)
@@ -1265,8 +1370,6 @@ def main():
 
     det_tool = DetectionTool3D(args.detection_path)
     agent = Agent3D(args, model, det_tool, device=device)
-
-    dataloader = load_3Deval_dataset(args.base_data_path, args.task_type, mode='common', batch_size=args.bs)
 
     # 增加时间戳防止覆盖
     answers_file = os.path.join(args.answers_dir, f"Agent_{args.task_type}.jsonl")

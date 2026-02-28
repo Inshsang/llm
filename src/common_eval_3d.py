@@ -10,14 +10,15 @@ import sys
 sys.path.insert(0,'/media/kou/Data1/htc/FastChat/fastchat/serve')
 from torch.utils.data import DataLoader, Dataset
 import openai
-openai.base_url = 'https://api.chatanywhere.tech'
-openai.api_key = os.getenv("OPENAI_API_KEY", "sk-QCZeLi6dlHMN1Ydo5TWgQjrgT7vwFIIbDe7ZKVC3LK5esWj6")
+base_url = 'https://api.chatanywhere.tech'
+api_key = os.getenv("OPENAI_API_KEY", "sk-QCZeLi6dlHMN1Ydo5TWgQjrgT7vwFIIbDe7ZKVC3LK5esWj6")
+# api_key = os.getenv("OPENAI_API_KEY", "sk-1Y2MEVStQ3Qg7c9ruWOBlt9wAfGAOMSZ52e5mLG5J33uisHH")
 
 from openai import OpenAI
 
 client = OpenAI(
-    base_url="https://api.chatanywhere.tech",
-    api_key=os.getenv("OPENAI_API_KEY", "sk-QCZeLi6dlHMN1Ydo5TWgQjrgT7vwFIIbDe7ZKVC3LK5esWj6")
+    base_url=base_url,
+    api_key=api_key
 )
 
 
@@ -600,8 +601,6 @@ def Positoinacc(dataset,pred_data):
             sentence1 = gt["sentences"][5:].lower().strip()
             sentence2 = pred_text.lower().strip()
             if sentence1 == sentence2:
-                answer = "True"
-            elif gt_char.lower() in sentence2:
                 answer = "True"
             else:
                 answer = "False"

@@ -1462,8 +1462,32 @@ def Train_Agent():
     outjson = []
 
     # ---------- Load templates / GT ----------
+    # Add VG_plus data loading for VisualGrounding_plus task
+    try:
+        vg_plus_path = "/data/HTC/Data/dataset/Benchmark/Task/Task_Reconstruct/WholeTrain/VisualGrounding_plus.json"
+        
+        vg_plus_data = {}
+        if os.path.exists(vg_plus_path):
+            with open(vg_plus_path, "r") as f:
+                v_data = json.load(f)
+                for item in v_data:
+                    # e.g., "scene/3.npy" or id="3", let's use id directly
+                    sid = str(item.get("id", ""))
+                    if not sid:
+                        # fallback parse from pcl
+                        pcl = item.get("pcl", "")
+                        if "scene/" in pcl:
+                            sid = pcl.split("/")[-1].replace(".npy", "")
+                    if sid:
+                        if sid not in vg_plus_data:
+                            vg_plus_data[sid] = []
+                        vg_plus_data[sid].append(item)
+    except Exception as e:
+        print(f"Warning: Could not load VisualGrounding_plus.json: {e}")
+        vg_plus_data = {}
+
     Qc, Ac, GTc, _ = filepath('Counting')
-    Q_Counting, _, GT_Counting = loading(Qc, Ac, GTc)  # list indexed by scene id (or dict-like)
+    Q_Counting, Answer_Counting, GT_Counting = loading(Qc, Ac, GTc)  # list indexed by scene id (or dict-like)
 
     Qv, Av, GTv, _ = filepath('VisualGrounding')
     Q_VG, _, _ = loading(Qv, Av, Qv)
@@ -1475,8 +1499,16 @@ def Train_Agent():
     Q_ROOM, _, GT_ROOM = loading(Qr, Ar, GTr)
 
     # Detection proposals
-    det_meta_path = root + "/Benchmark/data/metadata/Detection.json"
-    det_meta = json.load(open(det_meta_path, 'r'))
+    det_meta_path = "/data/HTC/Data/dataset/Benchmark/Task/GT/Detection.json"
+    det_meta = {}
+    with open(det_meta_path, 'r') as f:
+        for line in f:
+            line = line.strip()
+            if not line: continue
+            try:
+                det_meta.update(json.loads(line))
+            except json.JSONDecodeError:
+                continue
 
     # ---- 4-room space only (user confirmed) ----
     ROOM_SPACE = ["bedroom", "kitchen", "livingroom", "bathroom"]
@@ -1712,7 +1744,7 @@ def Train_Agent():
         "PositionRelation"
     }
 
-    ENABLE_TASKS = ("PositionRelation")
+    # ENABLE_TASKS = ("PositionRelation")
     
     for sid in range(0, 460):   #460
         sid_str = str(sid)
@@ -1724,44 +1756,96 @@ def Train_Agent():
         det_topk = all_objs[:20]
         if not det_topk:
             continue
-
+        
         # -----------------------
         # 1) VisualGrounding_plus
         # -----------------------
-        uniq_idxs = unique_name_indices(det_topk)
-        if "VisualGrounding_plus" in ENABLE_TASKS and len(uniq_idxs) >= 1:
-            vg_idx = random.choice(uniq_idxs)
-            vg_name = (det_topk[vg_idx].get("name", "") or det_topk[vg_idx].get("label", "") or "").lower()
-            vg_name_norm = norm(vg_name)
-            if vg_name_norm:
-                qtemp = Q_VG[str(random.randint(0, 29))]
-                user_q = re.sub(r"{C}", vg_name, qtemp) if "{C}" in qtemp else (qtemp + " " + vg_name)
+        scene_vgps = vg_plus_data.get(sid_str, [])
+        if "VisualGrounding_plus" in ENABLE_TASKS and scene_vgps:
+            # Generate ALL instances for this scene rather than just one
+            for vgp_obj in scene_vgps:
+                vg_target = None
+                vg_query = None
+                selected_indices = []
+                det_filtered = []
+                vg_name_norm = ""
+                
+                convs = vgp_obj.get("conversations", [])
+                if len(convs) >= 2:
+                    human_val = convs[0].get("value", "")
+                    gpt_val = convs[1].get("value", "")
+                    
+                    # parse obj index, e.g. "It is (obj3)."
+                    m = re.search(r'obj(\d+)', gpt_val)
+                    if m:
+                        target_idx = int(m.group(1))
+                        if 0 <= target_idx < len(all_objs):
+                            vg_target = all_objs[target_idx]
+                            vg_name = (vg_target.get("name", "") or vg_target.get("label", "") or "").lower()
+                            vg_name_norm = norm(vg_name)
+                            
+                            vg_query = human_val
+                            # Remove the specific prefix as requested
+                            vg_query = vg_query.replace("In all objects, tell me which is ", "Which is ")
+                            vg_query = vg_query.replace("In all objects, tell me which is", "Which is")
+                            
+                            # Find all objects of the same class in all_objs so the agent can choose
+                            hits = find_indices_by_keywords(all_objs, [vg_name_norm])
+                            hits = hits[:20]
+                            if target_idx not in hits:
+                                if len(hits) == 20:
+                                    hits[-1] = target_idx
+                                else:
+                                    hits.append(target_idx)
+                                hits = sorted(list(set(hits)))
+                                
+                            det_filtered = [all_objs[i] for i in hits]
+                            try:
+                                selected_indices = [hits.index(target_idx)]
+                            except ValueError:
+                                selected_indices = []
 
-                intent_ans = {
-                    "stage": "intent",
-                    "task": "VisualGrounding_plus",
-                    "focus": {"target": vg_name_norm, "A": "", "B": ""},
-                }
-                review_ans = {
-                    "stage": "review",
-                    "summary": "Select the referred object index, then finish with its bbox.",
-                    "selected_object_indices": [int(vg_idx)],
-                    "room_groups": [],
-                    "next_tool": {"tool": "FINISH", "args": {}},
-                }
-                bb = get_bbox(det_topk[vg_idx])
-                final_text = str(bb) if bb is not None else "unknown"
+                if vg_query and vg_target and vg_name_norm:
+                    qtemp = vg_query
+                    user_q = vg_query # Already formatted
+                    
+                    intent_ans = {
+                        "stage": "intent",
+                        "task": "VisualGrounding_plus",
+                        "focus": {"target": vg_name_norm},
+                        "tool_plan": [
+                            {"tool": "DETECT", "args": {}},
+                            {"tool": "FINISH", "args": {}},
+                        ],
+                    }
+                    review_ans = {
+                        "stage": "review",
+                        "summary": "Select the referred object indices, then finish with their bboxes.",
+                        "selected_object_indices": selected_indices,
+                        "room_groups": [],
+                        "next_tool": {"tool": "FINISH", "args": {}},
+                    }
+                    
+                    # Final text should include bboxes of ALL selected objects
+                    bboxes = []
+                    for idx in selected_indices:
+                         b = get_bbox(det_filtered[idx])
+                         if b:
+                             bboxes.append(str(b))
+                    final_text = " ".join(bboxes) if bboxes else "unknown"
 
-                conversations = [
-                    {"from": "human", "value": make_intent_prompt(user_q)},
-                    {"from": "gpt", "value": json.dumps(intent_ans, ensure_ascii=False)},
-                    {"from": "human", "value": make_review_prompt(user_q, det_topk)},
-                    {"from": "gpt", "value": json.dumps(review_ans, ensure_ascii=False)},
-                    {"from": "human", "value": make_finish_prompt(user_q, "Tool=FINISH\n(ready)")},
-                    {"from": "gpt", "value": final_text},
-                ]
-                outjson.append(getsinglejson(sid_str, str(sample_id), pcl_path, conversations, "Agent3d"))
-                sample_id += 1
+                    conversations = [
+                        {"from": "human", "value": make_intent_prompt(user_q)},
+                        {"from": "gpt", "value": json.dumps(intent_ans, ensure_ascii=False)},
+                        {"from": "human", "value": make_review_prompt(user_q, det_filtered)},
+                        {"from": "gpt", "value": json.dumps(review_ans, ensure_ascii=False)},
+                        {"from": "human", "value": make_finish_prompt(user_q, "Tool=FINISH\n(ready)")},
+                        {"from": "gpt", "value": final_text},
+                    ]
+                    outjson.append(getsinglejson(sid_str, str(sample_id), pcl_path, conversations, "Agent3d"))
+                    sample_id += 1
+
+        # Fallback if no VG_plus data found for this scene (optional, removed to match your requirement of using all valid vg_plus_data)
 
         # -----------------------
         # 2) Counting
@@ -1785,7 +1869,14 @@ def Train_Agent():
                 user_q = re.sub(r"{C}", objclass, qtemp) if "{C}" in qtemp else (qtemp + " " + objclass)
 
                 # explain indices from top-20 only
-                explain = find_indices_by_keywords(det_topk, [obj_norm])
+                # Filter for Counting: only target objects
+                hits = find_indices_by_keywords(det_topk, [obj_norm])
+                det_filtered = [det_topk[i] for i in hits] # All matching objects
+                # Update explain indices to be relative to det_filtered
+                # Since det_filtered contains ONLY the objects, all of them are "selected" for explanation?
+                # The original `explain` was indices in `det_topk`.
+                # If we pass `det_filtered` to prompt, the indices are 0..len-1.
+                explain_new = list(range(len(det_filtered)))
 
                 # tool COUNT uses ALL objs
                 count_all = tool_count_all(all_objs, obj_norm)
@@ -1830,24 +1921,34 @@ def Train_Agent():
                 intent_ans = {
                     "stage": "intent",
                     "task": "Counting",
-                    "focus": {"target": obj_norm, "A": "", "B": ""},
+                    "focus": {"target": obj_norm},
+                    "tool_plan": [
+                        {"tool": "DETECT", "args": {}},
+                        {"tool": "COUNT", "args": {"target": obj_norm}},
+                        {"tool": "FINISH", "args": {}},
+                    ],
                 }
                 review_ans = {
                     "stage": "review",
                     "summary": "Select indices for explanation (top-20), then call COUNT over all proposals.",
-                    "selected_object_indices": explain,
+                    "selected_object_indices": explain_new,
                     "room_groups": [],
-                    "next_tool": {"tool": "COUNT", "args": {"target": obj_norm, "use_all": True}},
+                    "next_tool": {"tool": "COUNT", "args": {"target": obj_norm}},
                 }
                 tool2_text = f"Tool=COUNT\nTarget={obj_norm}\ncount_all={count_all}\nfinal_count={final_count}"
+
+                # Generate natural language final answer like Train_Counting
+                ans_temp = Answer_Counting[str(random.randint(0, 29))]
+                ans_text = re.sub(r"{C}", objclass, ans_temp)
+                ans_text = re.sub(r"{N}", str(final_count), ans_text)
 
                 conversations = [
                     {"from": "human", "value": make_intent_prompt(user_q)},
                     {"from": "gpt", "value": json.dumps(intent_ans, ensure_ascii=False)},
-                    {"from": "human", "value": make_review_prompt(user_q, det_topk)},
+                    {"from": "human", "value": make_review_prompt(user_q, det_filtered)},
                     {"from": "gpt", "value": json.dumps(review_ans, ensure_ascii=False)},
                     {"from": "human", "value": make_finish_prompt(user_q, tool2_text)},
-                    {"from": "gpt", "value": str(final_count)},
+                    {"from": "gpt", "value": ans_text},
                 ]
                 outjson.append(getsinglejson(sid_str, str(sample_id), pcl_path, conversations, "Agent3d"))
                 sample_id += 1
@@ -1874,11 +1975,30 @@ def Train_Agent():
                  gt_rooms_scene = GT_ROOM[sid_str]
             elif int(sid_str) in GT_ROOM:
                  gt_rooms_scene = GT_ROOM[int(sid_str)]
+
+            # RoomDetection: Input 20 random objects
+            # We already have `det_topk` which is top-20 from `all_objs`.
+            # If we want "random" 20, we can sample from `all_objs` if len > 20.
+            # But `det_topk = all_objs[:20]` is currently used.
+            # User request: "RoomDetection输入二十个随机物体".
+            # Let's shuffle `all_objs` and take 20.
+            det_room_input = all_objs[:]
+            random.shuffle(det_room_input)
+            det_filtered = det_room_input[:20]
+            
+            # Since we changed component list, we must re-calculate `review_ans` (selected indices)
+            # The indices for room detection are groups of objects inside rooms.
+            # We need to re-run the "Find objects inside this GT bbox" logic using `det_filtered`.
             
             intent_ans = {
                 "stage": "intent",
                 "task": "RoomDetection",
-                "focus": {"target": "", "A": "", "B": ""},
+                "focus": {"target": ""},
+                "tool_plan": [
+                    {"tool": "DETECT", "args": {}},
+                    {"tool": "BBOX_UNION", "args": {}},
+                    {"tool": "FINISH", "args": {}},
+                ],
             }
     
             room_groups = []
@@ -1887,16 +2007,10 @@ def Train_Agent():
             
             # Iterate over GT rooms for this scene
             # gt_rooms_scene is likely { "bedroom": [x,y,z,l,w,h], "bathroom": ... }
-            # Note: distinct instances might be handled by keys like "bedroom", "bedroom (1)"? 
-            # Let's check `getanswerRoomDe`: for name,bbox in oneGT.items(): ...
-            
             if gt_rooms_scene:
                 for r_name, r_bbox in gt_rooms_scene.items():
                     # Clean room name (remove possible instance suffixes if any, assuming standard names)
-                    # But actually we want the label from ROOM_SPACE.
-                    # r_name might be "bedroom", "kitchen", etc.
-                    
-                    # Check if r_name is valid room type
+                    # ... (same logic)
                     valid_label = "unknown"
                     for space in ROOM_SPACE:
                         if space in r_name.lower():
@@ -1905,37 +2019,26 @@ def Train_Agent():
                     if valid_label == "unknown":
                         continue # Skip unknown rooms
                     
-                    
-                    # Let's safely handle bbox conversion
-                    # For polygon points (list of dicts), length varies (e.g. 4, 6, 8 points)
-                    # We need to detect if it is a list of dicts or a list of numbers.
                     final_bbox = r_bbox
                     if isinstance(r_bbox, list) and len(r_bbox) > 0 and isinstance(r_bbox[0], dict):
                          try:
                              final_bbox = point2box(r_bbox)
                          except Exception as e:
-                             # print(f"point2box failed for {valid_label}: {e}")
                              continue
                     
-                    # Check if final_bbox is valid [cx, cy, cz, l, w, h]
                     if not isinstance(final_bbox, list) or len(final_bbox) != 6 or isinstance(final_bbox[0], dict):
-                         # If still dicts or wrong length, skip
                          continue
                     
                     final_room_bboxes.append({"room_label": valid_label, "bbox": final_bbox})
                     
                     # For Review step: Find objects inside this GT bbox
-                    # Simple check: object center inside room bbox
+                    # USING det_filtered now
                     idxs_in_room = []
-                    for idx, obj in enumerate(det_topk):
+                    for idx, obj in enumerate(det_filtered):
                          obj_bb = get_bbox(obj)
                          if not obj_bb: continue
-                         # Check center
                          cx, cy, cz = obj_bb[0], obj_bb[1], obj_bb[2]
-                         # Room bbox: [cx, cy, cz, l, w, h]
-                         # Ensure final_bbox items are floats (sometimes they could be dicts if point2box failed weirdly or data structure issue)
                          if isinstance(final_bbox, dict):
-                             # If point2box returned a dict or it wasn't converted
                              continue
                          
                          try:
@@ -1943,28 +2046,21 @@ def Train_Agent():
                             if (abs(cx - rcx) <= rl/2) and (abs(cy - rcy) <= rh/2) and (abs(cz - rcz) <= rw/2):
                                 idxs_in_room.append(idx)
                          except Exception as e:
-                            # print(f"Error checking bbox inclusion: {e}")
                             continue
                     
-                    # If no objects found (unlikely), pick closest? Or just random fallback?
-                    # If Room is empty of detections, we might pick nothing or just "0".
                     if not idxs_in_room:
-                         # Fallback: pick objects matching keywords
+                         # Fallback: pick objects matching keywords IN DET_FILTERED
                          fk = [norm(x) for x in (ROOM_HINTS.get(valid_label, []) or []) if x]
-                         idxs_in_room = find_indices_by_keywords(det_topk, fk)
+                         idxs_in_room = find_indices_by_keywords(det_filtered, fk)
                     
                     if not idxs_in_room:
                          idxs_in_room = [0] # Last resort
                     
-                    # Cap at 8 for content length
                     idxs_in_room = idxs_in_room[:8]
-                    
                     room_groups.append({"room_label": valid_label, "indices": idxs_in_room})
-    
             else:
-                # Fallback if no GT found (should not happen if data is consistent)
-                 room_groups = [{"room_label": "livingroom", "indices": list(range(min(4, len(det_topk))))}]
-                 final_room_bboxes = [] # No result
+                 room_groups = [{"room_label": "livingroom", "indices": list(range(min(4, len(det_filtered))))}]
+                 final_room_bboxes = []
     
             review_ans = {
                 "stage": "review",
@@ -1973,11 +2069,11 @@ def Train_Agent():
             }
     
             # tool2 union per group -> produce ALL room bboxes
-            # union_out = tool_union_groups(det_topk, room_groups)
-            
-            # override union_out with GT based bboxes
+            # union_out = tool_union_groups(det_topk, room_groups) # Not used for GT generation actually, we use final_room_bboxes
             union_out = final_room_bboxes
     
+            # ... (text gen logic same) ...
+            
             # Build final answer (one per sentence). Keep compact and parse-friendly.
             final_lines = []
             for item in union_out:
@@ -2025,7 +2121,7 @@ def Train_Agent():
             conversations = [
                 {"from": "human", "value": make_intent_prompt(user_q)},
                 {"from": "gpt", "value": json.dumps(intent_ans, ensure_ascii=False)},
-                {"from": "human", "value": make_review_prompt(user_q, det_topk)},
+                {"from": "human", "value": make_review_prompt(user_q, det_filtered)},
                 {"from": "gpt", "value": json.dumps(review_ans, ensure_ascii=False)},
                 {"from": "human", "value": make_finish_prompt(user_q,'')},
                 {"from": "gpt", "value": final_text},
@@ -2108,24 +2204,37 @@ def Train_Agent():
                     user_q += f"\n{option_labels[i]} {opt}"
 
                 # 2) intent：不泄露 Subtask 字段，只让模型输出结构化工具计划
+                
+                # Filter DET to only include A and B (and maybe some distractors if we wanted, but user said "only targets")
+                # User request: "PositionRelation输入两个目标"
+                # Find the actual objects corresponding to a_idx and b_idx in original det_topk
+                objA = det_topk[a_idx]
+                objB = det_topk[b_idx]
+                det_filtered = [objA, objB]
+                
+                # New indices in filtered list: 0 and 1
+                new_a_idx = 0
+                new_b_idx = 1
+
                 intent_ans = {
                     "stage": "intent",
                     "task": "PositionRelation",
-                    "focus": {"target": "", "A": a_norm, "B": b_norm, "focus_keywords": []},
+                    "focus": {"target": [a_norm, b_norm]},
                     "tool_plan": [
-                        {"tool": "DETECT", "args": {"topk": 20}},
+                        {"tool": "DETECT", "args": {}},
                         {"tool": "REL_DIR", "args": {}},
                         {"tool": "FINISH", "args": {}},
                     ],
                 }
 
                 # 3) review：监督模型选 A/B 两个 index，并触发 REL_DIR
+                # Use new indices
                 review_ans = {
                     "stage": "review",
                     "summary": "Pick indices for the queried pair, then call REL_DIR.",
-                    "selected_object_indices": [int(a_idx), int(b_idx)],
+                    "selected_object_indices": [new_a_idx, new_b_idx],
                     "room_groups": [],
-                    "next_tool": {"tool": "REL_DIR", "args": {"A_idx": int(a_idx), "B_idx": int(b_idx)}},
+                    "next_tool": {"tool": "REL_DIR", "args": {"A_idx": new_a_idx, "B_idx": new_b_idx}},
                 }
 
                 # 4) tool2 输出（REL_DIR）：把 qid/flip 给 FINISH
@@ -2133,16 +2242,13 @@ def Train_Agent():
                 tool2_text = correct_ans_text
 
                 # 5) FINISH 的监督答案：输出完整句子（或者也可以带上选项 A/B/C/D，视训练目标而定）
-                # 这里保持输出自然语言句子，这通常是 CoT 的最后一步。或者可以改成 "The answer is (X). Correct Sentence."
-                # 既然是 Agent 任务，通常直接回答事实即可。
-                # 但如果在 intent/review 输入了选项，最好的回答是直接给出正确选项的内容。
                 
                 final_rel_sentence = correct_ans_text
 
                 conversations = [
                     {"from": "human", "value": make_intent_prompt(user_q)},
                     {"from": "gpt", "value": json.dumps(intent_ans, ensure_ascii=False)},
-                    {"from": "human", "value": make_review_prompt(user_q, det_topk)},
+                    {"from": "human", "value": make_review_prompt(user_q, det_filtered)},
                     {"from": "gpt", "value": json.dumps(review_ans, ensure_ascii=False)},
                     {"from": "human", "value": make_finish_prompt(user_q, tool2_text)},
                     {"from": "gpt", "value": final_rel_sentence},
@@ -2213,7 +2319,7 @@ def VG_Train():
         gt["pcl"] = "scene/"+i["pcl"][:-4]+".npy"
         gt["id"] = i["pcl"][:-4]
         question = json.load(open("/media/kou/Data1/htc/MYDATA/BenchMark/Task/Template/Q_VisualGrounding.json"))
-        query = "In all objects, tell me which is "+ i["text"][0].lower()+i["text"][1:]
+        query = "Which is a  "+ i["text"][0].lower()+i["text"][1:]
         scene = new_classdict[i["pcl"][:-4]]
         for index,box in enumerate(scene):
             if box["BoundingBox"] == i["box"]:
