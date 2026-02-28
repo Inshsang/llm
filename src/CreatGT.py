@@ -1868,14 +1868,20 @@ def Train_Agent():
                 qtemp = Q_Counting[str(random.randint(0, 29))]
                 user_q = re.sub(r"{C}", objclass, qtemp) if "{C}" in qtemp else (qtemp + " " + objclass)
 
-                # explain indices from top-20 only
-                # Filter for Counting: only target objects
-                hits = find_indices_by_keywords(det_topk, [obj_norm])
-                det_filtered = [det_topk[i] for i in hits] # All matching objects
+                # Use ALL objects to find matches (like VG_plus), ensuring targeted filtering
+                hits = find_indices_by_keywords(all_objs, [obj_norm])
+                
+                # We need to make sure we don't exceed token limits but keep relevant objects
+                # For counting, if we have > 20 matches, maybe just keep top 20
+                hits = sorted(list(set(hits)))
+                hits = hits[:20]
+                det_filtered = [all_objs[i] for i in hits]
+                
+                # If no matches (shouldn't happen with correct logic), fallback 
+                if not hits:
+                     det_filtered = []
+
                 # Update explain indices to be relative to det_filtered
-                # Since det_filtered contains ONLY the objects, all of them are "selected" for explanation?
-                # The original `explain` was indices in `det_topk`.
-                # If we pass `det_filtered` to prompt, the indices are 0..len-1.
                 explain_new = list(range(len(det_filtered)))
 
                 # tool COUNT uses ALL objs
@@ -2207,14 +2213,26 @@ def Train_Agent():
                 
                 # Filter DET to only include A and B (and maybe some distractors if we wanted, but user said "only targets")
                 # User request: "PositionRelation输入两个目标"
-                # Find the actual objects corresponding to a_idx and b_idx in original det_topk
-                objA = det_topk[a_idx]
-                objB = det_topk[b_idx]
-                det_filtered = [objA, objB]
+                # Find all objects matching intent keywords (a_norm, b_norm)
+                # Ensure specifically the chosen pair (a_idx, b_idx) is included if they happen to be missed (unlikely)
+                hits = find_indices_by_keywords(all_objs, [a_norm, b_norm])
                 
-                # New indices in filtered list: 0 and 1
-                new_a_idx = 0
-                new_b_idx = 1
+                # a_idx and b_idx are from det_topk which is all_objs[:20]. So they are valid indices in all_objs.
+                if a_idx not in hits: hits.append(a_idx)
+                if b_idx not in hits: hits.append(b_idx)
+                
+                hits = sorted(list(set(hits)))
+                hits = hits[:20] 
+                det_filtered = [all_objs[i] for i in hits]
+                
+                # Identify new indices for the specific pair in the filtered list
+                try:
+                    new_a_idx = hits.index(a_idx)
+                    new_b_idx = hits.index(b_idx)
+                except ValueError:
+                    # Fallback (should not happen due to append above)
+                    new_a_idx = 0
+                    new_b_idx = 1 if len(det_filtered) > 1 else 0
 
                 intent_ans = {
                     "stage": "intent",

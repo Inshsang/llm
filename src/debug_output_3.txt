@@ -1,0 +1,8 @@
+Setting ds_accelerator to cuda (auto detect)
+INFO 02-28 18:44:33 [cache_tensor_manager.py:17] USE_GPU_TENSOR_CACHE is On
+WARNING 02-28 18:44:33 [sgl_utils.py:14] sgl_kernel is not installed, you can't use the api of it.                    You can solve it by running `pip install sgl_kernel`.
+WARNING 02-28 18:44:33 [sgl_utils.py:29] sgl_kernel is not installed, or the installed version did not support fa3.         Try to upgrade it.
+WARNING 02-28 18:44:33 [vllm_utils.py:18] vllm is not installed, you can't use the api of it.                    You can solve it by running `pip install vllm`.
+WARNING 02-28 18:44:33 [light_utils.py:13] lightllm_kernel is not installed, you can't use the api of it.
+WARNING 02-28 18:44:33 [grouped_fused_moe_ep.py:28] no deepep or deep_gemm
+INFO 02-28 18:44:33 [communication_op.py:57] deep_ep is not installed, you can't use the api of it.

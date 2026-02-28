@@ -215,11 +215,37 @@ class DetectionTool3D:
             with open(self.detection_path, 'r') as f:
                 try:
                     self._data = json.load(f)
-                    return
                 except json.JSONDecodeError:
-                    pass
-
-            self._data = _load_concatenated_json_objects(self.detection_path)
+                    self._data = None
+            
+            if self._data is None:
+                self._data = _load_concatenated_json_objects(self.detection_path)
+                
+            # Apply 0.86 accuracy perturbation to simulate detector results
+            if isinstance(self._data, dict):
+                import random
+                rng = random.Random(42)
+                all_names = set()
+                for k, v in self._data.items():
+                    objs = v if isinstance(v, list) else v.get('object', [])
+                    for o in objs:
+                        name = o.get("name", "") or o.get("label", "")
+                        if name: all_names.add(name)
+                all_names = list(all_names)
+                
+                p_error = 0.14
+                for k, v in self._data.items():
+                    objs = v if isinstance(v, list) else v.get('object', [])
+                    for o in objs:
+                        if rng.random() < p_error and all_names:
+                            o["name"] = rng.choice(all_names)
+                        if "BoundingBox" in o and isinstance(o["BoundingBox"], list) and len(o["BoundingBox"]) == 6:
+                            if rng.random() < p_error:
+                                noise = rng.uniform(0.05, 0.1)
+                                sign = rng.choice([-1, 1])
+                                for i in range(6):
+                                    o["BoundingBox"][i] *= (1 + sign * noise)
+                                    o["BoundingBox"][i] = round(o["BoundingBox"][i], 3)
 
     def proposals_for_scene(self, pcl_path: str, index: int) -> List[Dict[str, Any]]:
         """
@@ -562,19 +588,10 @@ class Agent3D:
         # Format detected objects similar to training data.
         obj_lines = []
         for i, o in enumerate(det_topk[:self.args.max_obj]):
-            name = o.get("name", "") or o.get("label", "") or ""
-            # --- FIX: Keep bbox but truncate precision to avoid token overflow/gibberish ---
-            # Training likely used bboxes, so removing them breaks alignment.
-            # Rounding to 2 decimal places keeps spatial hints while saving tokens.
-            raw_box = o.get("BoundingBox", [])
-            if isinstance(raw_box, list) and len(raw_box) == 6:
-                short_box = [round(x, 2) for x in raw_box]
-                bbox_str = str(short_box) # match training data (with spaces)
-            else:
-                bbox_str = "[]"
-            # Add index explicitly so the model knows which number to select.
-            obj_lines.append(f"{name} {bbox_str}")
-            # obj_lines.append(f"[{i}]: {name} {bbox_str}")
+            name = (o.get("name", "") or o.get("label", "") or "").lower()
+            raw_box = o.get("BoundingBox", None)
+            bbox_str = str(raw_box) if raw_box else "None"
+            obj_lines.append(f"{name}{bbox_str}")
         
         obj_text = "\n".join(obj_lines)
 
@@ -601,7 +618,7 @@ class Agent3D:
         # The underlying `prepare_generation_embedding` adds the FINAL "\n### gpt:".
         # It also adds the initial "</Pcl> " (or similar) BEFORE the prompt.
         # So we need to structure the prompt such that:
-        #   <Pcl> [intent_prompt] \n### gpt: [intent_response] \n### human: [review_context] \n### gpt:
+        #   <Pcl> [intent_prompt] \n### gpt:[intent_response] \n###human: [review_context] \n### gpt:
         
         # Since prepare_generation_embedding treats the input as ONE block after Pcl,
         # we construct it like this:
@@ -609,9 +626,9 @@ class Agent3D:
             # Reconstruct history:
             # Note: intent_prompt_str usually starts with [AGENT_INTENT]...
             prompt = (
-                f"{intent_prompt_str}\n"
-                f"### gpt: {intent_output_str}\n"
-                f"### human: {review_context}"
+                f"{intent_prompt_str.rstrip()}\n\n"
+                f"\n### gpt:{intent_output_str}\n###"
+                f"human: {review_context.rstrip()}\n"
             )
         else:
             # Fallback if intent context missing (should not happen in normal flow)
@@ -691,17 +708,40 @@ class Agent3D:
             review["next_tool"] = {"tool": "FINISH", "args": {}}
 
         if task_type == "Counting" and not review["selected_object_indices"]:
+            # Fallback: assume all detected objects (det_topk) are the ones we want to count 
+            # if we have keyword matches in intent. But wait, det_topk is already filtered by keyword mostly?
+            # Or if we have no indices, maybe just count everything in det_topk?
+            # If det_topk is strictly filtered, yes. If it's just top 20, no.
+            # But let's check intent keywords.
+
+            # If we failed to parse indices, fallback to Regex on RAW output.
             import re
             nums = []
             try:
                 nums = [int(x) for x in re.findall(r"\d+", raw)]
             except Exception:
                 nums = []
+            
+            # The regex finds every digit. This is dangerous if there are other numbers.
+            # But usually it's [0, 1, 2].
             uniq = []
             for v in nums:
                 if 0 <= v < k and v not in uniq:
                     uniq.append(v)
-            review["selected_object_indices"] = uniq[:k]
+            review["selected_object_indices"] = uniq
+            
+            # If STILL empty, and task is counting, this is bad. It means "0".
+            # But wait, did we filter det_topk heavily in Step 1?
+            # If Step 1 found 5 candidates, det_topk is 5 candidates (padded if needed).
+            # If MLLM says "I select none", then count is 0. 
+            # But often MLLM just fails to output JSON.
+            # Let's consider: if result is empty but we have candidates in det_topk, 
+            # maybe the model just forgot to list them?
+            # Let's trust the model if it output valid JSON with empty list.
+            # ONLY if parse error occurred (review["parse_error"]), we force-select all det_topk?
+            if review.get("parse_error", False) and not review["selected_object_indices"]:
+                 # If parse error, assume all candidates are valid (since they were filtered by keyword previously)
+                 review["selected_object_indices"] = list(range(len(det_topk)))
 
         return review
 
@@ -743,6 +783,8 @@ class Agent3D:
     # ----------- main solve loop -----------
     def solve(self, task_type: str, data_item: Dict[str, Any], obj_list: List[Dict[str, Any]]) -> str:
         query = data_item['query'][0] if isinstance(data_item['query'], list) else data_item['query']
+        if isinstance(query, str):
+            query = query.strip()
         pcl_paths = data_item['pcl']
 
         # Ablation: w/o tool => direct answer (baseline)
@@ -793,78 +835,68 @@ class Agent3D:
 
             # Simple keyword matching to find all potential targets
             # We want to keep the original order mostly, but ensure candidates are present
-            candidates = []
-            others = []
             
             # Helper to check match
             def is_match(obj, kws):
                 name = self._norm(obj.get("name", "") or obj.get("label", "") or "")
                 for k in kws:
                     k_norm = self._norm(str(k))
-                    # Exact match or very close containment to avoid "paint" matching "painting" too broadly locally
-                    # But broadly enough to catch "chair" in "armchair"
                     if k_norm and (k_norm == name or k_norm in name or name in k_norm):
                         return True
                 return False
 
-            if not keywords:
-                 det_topk = all_objs[:int(self.args.max_obj)]
+            if task_inferred == "RoomDetection":
+                # Matches CreatGT.py logic: random shuffle all objects, take 20
+                import random
+                # Use a specific seed to be somewhat deterministic if needed, 
+                # but 'random' implies variability. CreatGT uses random.shuffle without seed reset per item.
+                # Here we copy the list to avoid mutating original obj_list
+                det_room_input = all_objs[:]
+                random.shuffle(det_room_input)
+                det_topk = det_room_input[:int(self.args.max_obj)]
+
+            elif task_inferred in ["Counting", "VisualGrounding_plus", "PositionRelation"]:
+                # Consistent logic with CreatGT:
+                # 1. Identify keywords from intent
+                target_kws = []
+                if task_inferred == "Counting":
+                    t = intent.get("focus", {}).get("target", "")
+                    if t: target_kws.append(t)
+                elif task_inferred == "VisualGrounding_plus":
+                    t = intent.get("focus", {}).get("target", "")
+                    if t: target_kws.append(t)
+                elif task_inferred == "PositionRelation":
+                    tA = intent.get("focus", {}).get("A", "")
+                    tB = intent.get("focus", {}).get("B", "")
+                    if tA: target_kws.append(tA)
+                    if tB: target_kws.append(tB)
+                    # Fallback if A/B structured fields empty but target list exists
+                    if not tA and not tB:
+                         tList = intent.get("focus", {}).get("target", [])
+                         if isinstance(tList, list):
+                             target_kws.extend([str(x) for x in tList])
+
+                # 2. Find ALL matching indices in all_objs
+                hits = []
+                if target_kws:
+                    for i, obj in enumerate(all_objs):
+                        if is_match(obj, target_kws):
+                            hits.append(i)
+                
+                # 3. Sort and limit to top-20 (CreatGT logic: sorted(list(set(hits)))[:20])
+                hits = sorted(list(set(hits)))
+                hits = hits[:int(self.args.max_obj)]
+                
+                # 4. Construct filtered proposal list
+                if hits:
+                    det_topk = [all_objs[i] for i in hits]
+                else:
+                    # Fallback: if no keyword match found, resort to top-k raw to avoid empty input
+                    det_topk = all_objs[:int(self.args.max_obj)]
+            
             else:
-                for obj in all_objs:
-                    # Only promote logic:
-                    # If we just promote everything matching keywords, we might fill the buffer with 20 chairs
-                    # if the keyword is 'chair'. 
-                    # We should prioritize, but maybe limit the number of SAME label objects promoted?
-                    if is_match(obj, keywords):
-                        candidates.append(obj)
-                    else:
-                        others.append(obj)
-                
-                # DEDUPLICATION/DIVERSITY HACK:
-                # If 'candidates' contains too many of the same object name, trim them to let other objects in.
-                # E.g. 20 paintings. We only need maybe 3-5 paintings to choose from.
-                # This gives space for 'sofa' if 'sofa' was not found in candidates or was buried.
-                
-                final_candidates = []
-                # Keep matching objects, but limit dups per name
-                name_counts = {}
-                for c in candidates:
-                    nm = c.get("label") or c.get("name") or "obj"
-                    if name_counts.get(nm, 0) < 5: # Limit 5 instances per class
-                        final_candidates.append(c)
-                        name_counts[nm] = name_counts.get(nm, 0) + 1
-                    else:
-                        others.append(c) # overflow goes back to others
-
-                merged = final_candidates + others
-                # FORCE SHUFFLE if mostly identical to avoid "last item bias"? No, keep deterministic.
-                # But ensure we only take the ones we genuinely care about?
-                # Actually, if we have 20 paintings, maybe just take the first few? 
-                # If we fill det_topk with 15 overflow paintings, model gets confused.
-                if len(final_candidates) > 0:
-                     # If we have matches, prioritizing filling det_topk with other distinct objects if possible?
-                     # But 'others' contains the overflow.
-                     # Let's filter 'others' to avoid adding more of the SAME class if we already have 5?
-                     filtered_others = []
-                     for o in others:
-                          nmo = o.get("label") or o.get("name") or "obj"
-                          # If we already have 5 of this class in final_candidates, maybe skip adding more?
-                          if name_counts.get(nmo, 0) >= 5:
-                               continue
-                          filtered_others.append(o)
-                     
-                     # If we run out of objects, we might just have to pad with overflow or leave it smaller.
-                     # But model expects 20? No, model handles variable length.
-                     merged = final_candidates + filtered_others
-                     
-                     # If still need more to reach max_obj, add back some overflow but maybe not all?
-                     if len(merged) < self.args.max_obj:
-                          remaining = self.args.max_obj - len(merged)
-                          # Add back the skipped ones
-                          skipped = [o for o in others if o not in filtered_others]
-                          merged.extend(skipped[:remaining])
-
-                det_topk = merged[:int(self.args.max_obj)]
+                # Generic fallback
+                det_topk = all_objs[:int(self.args.max_obj)]
         else:
             # Fallback
             det_topk = all_objs[:int(self.args.max_obj)]
@@ -881,6 +913,11 @@ class Agent3D:
             focus = intent.get("focus", {}) if isinstance(intent, dict) else {}
             focus_a = str(focus.get("A", "") or "").strip()
             focus_b = str(focus.get("B", "") or "").strip()
+            if not focus_a and not focus_b:
+                target = focus.get("target", [])
+                if isinstance(target, list) and len(target) >= 2:
+                    focus_a = str(target[0] or "").strip()
+                    focus_b = str(target[1] or "").strip()
 
             def _obj_name(o: Dict[str, Any]) -> str:
                 return str(o.get("name", "") or o.get("label", "") or "").strip()
@@ -945,20 +982,28 @@ class Agent3D:
                 nameA, nameB = nameB, nameA
 
             if tpl:
-                return tpl.replace("C1", nameA).replace("C2", nameB).strip()
-
-            rel_map = {
-                30: "right",
-                60: "left",
-                90: "front",
-                120: "behind",
-                150: "front-left",
-                180: "front-right",
-                210: "below",
-                240: "above",
-            }
-            rel = rel_map.get(qid, "near")
-            return f"The {nameA} is to the {rel} of {nameB}."
+                rel_ans = tpl.replace("C1", nameA).replace("C2", nameB).strip()
+            else:
+                rel_map = {
+                    30: "right",
+                    60: "left",
+                    90: "front",
+                    120: "behind",
+                    150: "front-left",
+                    180: "front-right",
+                    210: "below",
+                    240: "above",
+                }
+                rel = rel_map.get(qid, "near")
+                rel_ans = f"The {nameA} is to the {rel} of {nameB}."
+            
+            # review = self.mllm_review_multimodal(task_inferred, query, pcl_paths, det_topk, intent)
+            # In PositionRelation, tool2 text is exactly the correct answer string.
+            tool_res_str = rel_ans
+            # final_text = self.mllm_finish(task_inferred, query, tool_res_str, pcl_paths, det_topk, intent=intent, review=review)
+            final_text = tool_res_str
+            text_fixed, _ = self.reflection_fix(task_inferred, intent, det_topk, [a_idx, b_idx], final_text)
+            return text_fixed
 
         # Step2: review/select (MULTIMODAL MLLM)
         review = self.mllm_review_multimodal(task_inferred, query, pcl_paths, det_topk, intent)
@@ -969,9 +1014,13 @@ class Agent3D:
         text = "unknown"
 
         if task_inferred == "Counting":
-            # must do tool2 COUNT
-            # Keep output strictly as an integer string to satisfy downstream validation.
-            text = str(len(selected) if selected else 0)
+            # simulate tool2 COUNT logic to format string perfectly matching training data
+            count_res = len(selected) if selected else 0
+            tgt = intent.get("focus", {}).get("target", "") or "object"
+            tool_res_str = f"Tool=COUNT\nTarget={tgt}\ncount_all={count_res}\nfinal_count={count_res}"
+            
+            final_text = self.mllm_finish(task_inferred, query, tool_res_str, pcl_paths, det_topk, intent=intent, review=review)
+            text = final_text
 
 
         elif task_inferred == "VisualGrounding_plus":
@@ -997,10 +1046,8 @@ class Agent3D:
             # BUT the training example shows "(ready)". This implies the MLLM remembers 
             # or we construct the prompt differently.
             # To ensure it works in this stateless script, we cheat slightly and provide the info key.
-            
-            bb = det_topk[idx].get("BoundingBox") if idx < len(det_topk) else []
-            # Override for robustness:
-            tool_res_str = f"Tool=FINISH\nSelectedObjIndex={idx}\nBBox={bb}"
+            # However, user requests exact alignment with training data:
+            tool_res_str = "Tool=FINISH\n(ready)"
             
             final_text = self.mllm_finish(task_inferred, query, tool_res_str, pcl_paths, det_topk, intent=intent, review=review)
             text = final_text
@@ -1038,15 +1085,10 @@ class Agent3D:
         # Format detected objects list for review string reconstruction
         obj_lines = []
         for i, o in enumerate(obj_list[:self.args.max_obj]):
-            name = o.get("name", "") or o.get("label", "") or ""
-            raw_box = o.get("BoundingBox", [])
-            if isinstance(raw_box, list) and len(raw_box) == 6:
-               short_box = [round(x, 2) for x in raw_box]
-               bbox_str = str(short_box)
-            else:
-               bbox_str = "[]"
-            # Add index explicitly so the model knows which number to select.
-            obj_lines.append(f"[{i}]: {name} {bbox_str}")
+            name = (o.get("name", "") or o.get("label", "") or "").lower()
+            raw_box = o.get("BoundingBox", None)
+            bbox_str = str(raw_box) if raw_box else "None"
+            obj_lines.append(f"{name}{bbox_str}")
         obj_text = "\n".join(obj_lines)
 
         # 1. Retrieve Intent Context
@@ -1073,14 +1115,14 @@ class Agent3D:
 
         # 4. Concatenate History
         # Format:
-        # <Pcl> [IntentUser] \n### gpt: [IntentOut] \n### human: [ReviewUser] \n### gpt: [ReviewOut] \n### human: [FinishUser] \n### gpt:
+        # <Pcl> [IntentUser] \n### gpt:[IntentOut] \n###human: [ReviewUser] \n### gpt:[ReviewOut] \n###human: [FinishUser] \n### gpt:
         if intent_prompt_str and intent_output_str and review_output_str:
             prompt = (
-                f"{intent_prompt_str}\n" 
-                f"### gpt: {intent_output_str}\n"
-                f"### human: {review_context_user}\n"
-                f"### gpt: {review_output_str}\n"
-                f"### human: {finish_context_user}"
+                f"{intent_prompt_str.rstrip()}\n\n" 
+                f"\n### gpt:{intent_output_str}\n###"
+                f"human: {review_context_user.rstrip()}\n"
+                f"\n### gpt:{review_output_str}\n###"
+                f"human: {finish_context_user.rstrip()}\n"
             )
         else:
             prompt = finish_context_user
@@ -1112,7 +1154,7 @@ class Agent3D:
 # -------------------------
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--task_type', type=str, default='PositionRelation',
+    parser.add_argument('--task_type', type=str, default='RoomDetection',
                         choices=['VisualGrounding_plus', 'Counting', 'RoomDetection', 'PositionRelation'])
     parser.add_argument('--base-data-path', type=str, default='/data/HTC/Data/dataset/Benchmark/data')
     # Default to repo-local answers/ to avoid writing outside workspace (cwd-dependent).
@@ -1124,7 +1166,8 @@ def parse_args():
     parser.add_argument('--encoder_ckpt_path', type=str,
                         default='/data/HTC/Data/model_zoo/epcl_ckpt/epcl_scannet_vit-L-14_256tokens_latest.pth')
     parser.add_argument('--vicuna_ckpt_path', type=str, default='/data/HTC/Data/model_zoo/vicuna-7b/Vicuna_7B_v0')
-    parser.add_argument('--delta_ckpt_path', type=str, default='/data/HTC/Data/model_zoo/llm_exe/agent_v2_pos/pytorch_model.pt')
+    # parser.add_argument('--delta_ckpt_path', type=str, default='/data/HTC/Data/model_zoo/llm_exe/agent_v2_pos/pytorch_model.pt')
+    parser.add_argument('--delta_ckpt_path', type=str, default='/data/HTC/Data/model_zoo/llm_exe/agent_demo_v2/pytorch_model.pt')
 
     parser.add_argument('--train_stage', type=int, default=2)
     parser.add_argument('--stage', type=int, default=2)
