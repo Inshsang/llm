@@ -846,18 +846,12 @@ class Agent3D:
                 return False
 
             if task_inferred == "RoomDetection":
-                # Matches CreatGT.py logic: random shuffle all objects, take 20
                 import random
-                # Use a specific seed to be somewhat deterministic if needed, 
-                # but 'random' implies variability. CreatGT uses random.shuffle without seed reset per item.
-                # Here we copy the list to avoid mutating original obj_list
                 det_room_input = all_objs[:]
                 random.shuffle(det_room_input)
                 det_topk = det_room_input[:int(self.args.max_obj)]
 
             elif task_inferred in ["Counting", "VisualGrounding_plus", "PositionRelation"]:
-                # Consistent logic with CreatGT:
-                # 1. Identify keywords from intent
                 target_kws = []
                 if task_inferred == "Counting":
                     t = intent.get("focus", {}).get("target", "")
@@ -870,35 +864,28 @@ class Agent3D:
                     tB = intent.get("focus", {}).get("B", "")
                     if tA: target_kws.append(tA)
                     if tB: target_kws.append(tB)
-                    # Fallback if A/B structured fields empty but target list exists
                     if not tA and not tB:
                          tList = intent.get("focus", {}).get("target", [])
                          if isinstance(tList, list):
                              target_kws.extend([str(x) for x in tList])
 
-                # 2. Find ALL matching indices in all_objs
                 hits = []
                 if target_kws:
                     for i, obj in enumerate(all_objs):
                         if is_match(obj, target_kws):
                             hits.append(i)
                 
-                # 3. Sort and limit to top-20 (CreatGT logic: sorted(list(set(hits)))[:20])
                 hits = sorted(list(set(hits)))
                 hits = hits[:int(self.args.max_obj)]
                 
-                # 4. Construct filtered proposal list
                 if hits:
                     det_topk = [all_objs[i] for i in hits]
                 else:
-                    # Fallback: if no keyword match found, resort to top-k raw to avoid empty input
                     det_topk = all_objs[:int(self.args.max_obj)]
             
             else:
-                # Generic fallback
                 det_topk = all_objs[:int(self.args.max_obj)]
         else:
-            # Fallback
             det_topk = all_objs[:int(self.args.max_obj)]
 
         if not det_topk:
@@ -997,10 +984,7 @@ class Agent3D:
                 rel = rel_map.get(qid, "near")
                 rel_ans = f"The {nameA} is to the {rel} of {nameB}."
             
-            # review = self.mllm_review_multimodal(task_inferred, query, pcl_paths, det_topk, intent)
-            # In PositionRelation, tool2 text is exactly the correct answer string.
             tool_res_str = rel_ans
-            # final_text = self.mllm_finish(task_inferred, query, tool_res_str, pcl_paths, det_topk, intent=intent, review=review)
             final_text = tool_res_str
             text_fixed, _ = self.reflection_fix(task_inferred, intent, det_topk, [a_idx, b_idx], final_text)
             return text_fixed
@@ -1014,7 +998,6 @@ class Agent3D:
         text = "unknown"
 
         if task_inferred == "Counting":
-            # simulate tool2 COUNT logic to format string perfectly matching training data
             count_res = len(selected) if selected else 0
             tgt = intent.get("focus", {}).get("target", "") or "object"
             tool_res_str = f"Tool=COUNT\nTarget={tgt}\ncount_all={count_res}\nfinal_count={count_res}"
@@ -1024,45 +1007,19 @@ class Agent3D:
 
 
         elif task_inferred == "VisualGrounding_plus":
-            # VisualGrounding_plus is just DETECT -> FINISH. 
-            # Review step selected the index.
             if len(selected) != 1:
                 tgt = intent.get("focus", {}).get("target", "")
                 hits = self._find_by_keywords_fallback(det_topk, [tgt] if tgt else [])
                 selected = [hits[0]] if hits else [0]
-
-            # In training data, VG finish tool result is just "(ready)" or specific bbox. 
-            # The MLLM has already seen the object list in Review.
-            # However, providing the bbox again in tool result helps stability.
-            # Training example: "[TOOL_RESULT]\nTool=FINISH\n(ready)"
             
             idx = selected[0]
-            # We must adhere to protocol: MLLM looks up index from memory/context
-            # OR we provide helper info.
-            tool_res_str = "Tool=FINISH\n(ready)" 
-            
-            # Since we pass context in a stateless way to mllm_finish (it just sees the prompt string),
-            # we SHOULD include the bbox in TOOL_RESULT so MLLM can copy it to final answer.
-            # BUT the training example shows "(ready)". This implies the MLLM remembers 
-            # or we construct the prompt differently.
-            # To ensure it works in this stateless script, we cheat slightly and provide the info key.
-            # However, user requests exact alignment with training data:
             tool_res_str = "Tool=FINISH\n(ready)"
             
             final_text = self.mllm_finish(task_inferred, query, tool_res_str, pcl_paths, det_topk, intent=intent, review=review)
             text = final_text
 
         elif task_inferred == "RoomDetection":
-            # Just call FINISH tool with no groups since we are not using them anymore
-            # And rely on MLLM to finish the task
             tool_res_str = "Tool=FINISH\n"
-            
-            # Since we removed the logic to compute union from indices, we just pass the tool name
-            # Ideally the MLLM in 'finish' stage should have the knowledge or the tool should return something
-            # But based on user request "delete inference part room_groups and next_tool args",
-            # we imply the finish stage will handle generation or we just return a placeholder.
-            
-            # If the goal is to output "unknown" or let MLLM hallucinate/retrieve from memory:
             final_text = self.mllm_finish(task_inferred, query, " ", pcl_paths, det_topk, intent=intent, review=review)
             text = final_text
         
