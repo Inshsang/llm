@@ -1746,7 +1746,7 @@ def Train_Agent():
 
     # ENABLE_TASKS = ("PositionRelation")
     
-    for sid in range(0, 460):   #460
+    for sid in range(0, 100):   #460
         sid_str = str(sid)
         pcl_path = "scene/" + sid_str + ".npy"
 

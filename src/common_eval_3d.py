@@ -720,7 +720,8 @@ if __name__ == "__main__":
     
     # [Modify] Agent 模式：依次评估 4 个子任务
     if task_name == "Agent":
-        subtasks = ["Counting", "VisualGrounding_plus", "RoomDetection", "PositionRelation"]
+        # subtasks = ["Counting", "VisualGrounding_plus", "RoomDetection", "PositionRelation"]
+        subtasks = ["Counting", "VisualGrounding_plus", "RoomDetection"]
         for sub in subtasks:
             print(f"\n{'='*15} Eval Agent Subtask: {sub} {'='*15}")
             

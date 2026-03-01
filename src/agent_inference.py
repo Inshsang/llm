@@ -568,8 +568,8 @@ class Agent3D:
                 "focus_keywords": [],
             },
             "tool_plan": [
-                {"tool": "DETECT", "args": {"topk": 20}},
-                {"tool": "FINISH", "args": {}},
+                {"tool": "DETECT"},
+                {"tool": "FINISH"},
             ],
             "raw": raw,
         }
@@ -603,6 +603,10 @@ class Agent3D:
         # 1. Retrieve Intent Context
         intent_prompt_str = intent.get("prompt", "")
         intent_output_str = intent.get("raw", "")
+        # Remove 'args' from intent output string to clean up history
+        import re
+        intent_output_str = re.sub(r',\s*"args":\s*\{[^}]*\}', '', intent_output_str) 
+        intent_output_str = re.sub(r'"args":\s*\{[^}]*\},\s*', '', intent_output_str)
 
         # 2. Build Review Context
         review_context = (
@@ -697,15 +701,15 @@ class Agent3D:
 
         # 强制校正 next_tool（与任务一致）
         if task_type == "Counting":
-            review["next_tool"] = {"tool": "COUNT", "args": {}}
+            review["next_tool"] = {"tool": "COUNT"}
         elif task_type == "PositionRelation":
-            indices = review["selected_object_indices"]
-            args = {}
-            if len(indices) >= 1: args["A_idx"] = indices[0]
-            if len(indices) >= 2: args["B_idx"] = indices[1]
-            review["next_tool"] = {"tool": "REL_DIR", "args": args}
+            # indices = review["selected_object_indices"]
+            # args = {}
+            # if len(indices) >= 1: args["A_idx"] = indices[0]
+            # if len(indices) >= 2: args["B_idx"] = indices[1]
+            review["next_tool"] = {"tool": "REL_DIR"}
         else:
-            review["next_tool"] = {"tool": "FINISH", "args": {}}
+            review["next_tool"] = {"tool": "FINISH"}
 
         if task_type == "Counting" and not review["selected_object_indices"]:
             # Fallback: assume all detected objects (det_topk) are the ones we want to count 
@@ -754,13 +758,7 @@ class Agent3D:
             return text, trace
 
         if task_type == "Counting":
-            try:
-                int(text.strip())
-                return text, trace
-            except Exception:
-                trace["applied"] = True
-                trace["reason"] = "count_not_int_fallback_0"
-                return "0", trace
+            return text.strip(), trace
 
         if task_type == "PositionRelation":
             return text.strip(), trace
@@ -781,7 +779,7 @@ class Agent3D:
         return text, trace
 
     # ----------- main solve loop -----------
-    def solve(self, task_type: str, data_item: Dict[str, Any], obj_list: List[Dict[str, Any]]) -> str:
+    def solve(self, task_type: str, data_item: Dict[str, Any], obj_list: List[Dict[str, Any]]) -> Tuple[str, Dict[str, Any]]:
         query = data_item['query'][0] if isinstance(data_item['query'], list) else data_item['query']
         if isinstance(query, str):
             query = query.strip()
@@ -802,7 +800,7 @@ class Agent3D:
                 temperature=1e-5,
             )
             text = direct[0] if isinstance(direct, list) and direct else str(direct)
-            return text
+            return text, {}
         
         if task_type == "RoomDetection":
             query = "Locate the locations of every room within the scene."
@@ -891,8 +889,8 @@ class Agent3D:
         if not det_topk:
             # hard fallback
             if task_type == "Counting":
-                return "1"
-            return "unknown"
+                return "1", intent
+            return "unknown", intent
 
         # Special-case: PositionRelation should IGNORE review-selected indices.
         # Use Intent focus(A,B) directly, then compute relation from detection bboxes.
@@ -935,11 +933,76 @@ class Agent3D:
 
             a_idx = a_hits[0] if a_hits else 0
             b_idx = b_hits[0] if b_hits else (1 if len(search_space) > 1 else 0)
+            
+            # If A and B are the same instance/index, try to pick a different B if possible
             if b_idx == a_idx and len(b_hits) > 1:
                 b_idx = b_hits[1]
             if b_idx == a_idx and len(search_space) > 1:
+                # Fallback: just pick something else
                 b_idx = 1 if a_idx == 0 else 0
-
+            
+            # NOTE on Ordering:
+            # Training data (CreatGT) generates question "Relation between A and B?" 
+            # and may select indices [idxA, idxB] OR [idxB, idxA] depending on filtering sort order?
+            # Actually CreatGT logic:
+            #   hits = sorted([...])
+            #   new_a_idx = hits.index(a_idx)
+            #   new_b_idx = hits.index(b_idx)
+            # So the indices in 'selected_object_indices' will be relative to det_filtered.
+            # BUT the inference logic here in PositionRelation block *ignores* 'selected_object_indices'
+            # and re-computes `a_idx` and `b_idx` from keywords directly.
+            #
+            # Crucially, `_find_matches` returns indices in ascending order (if det_topk is sorted, which it is from `hits` sort in CreatGT-mirror logic).
+            # If `focus_a` == `focus_b` (e.g. "chair" vs "chair"), `a_hits` and `b_hits` are identical lists.
+            # Then `a_idx = a_hits[0]`, `b_idx = b_hits[0]` -> same object.
+            # The logic above fixes `b_idx` to `b_hits[1]` if possible.
+            #
+            # However, does "Relation between Chair A and Chair B" imply a specific instance order?
+            # In CreatGT, `a_idx` and `b_idx` are chosen randomly from unique instances.
+            # The Question prompts with `{C1}` and `{C2}` where names might be same.
+            # If names are same, ambiguity exists.
+            # If names differ (e.g. "bed" and "table"), `find_matches` distinguishes them.
+            #
+            # Issue: If `a_norm` == `b_norm` (e.g. two chairs), CreatGT picks two distinct specific instances.
+            # Inference receives just "chair" and "chair". 
+            # `find_matches` returns [chair1_idx, chair2_idx, ...].
+            # `a_idx` takes chair1_idx. `b_idx` takes chair2_idx (via fix).
+            # This order [0, 1] is deterministic.
+            # But the ground truth might have been relation(chair2, chair1).
+            # If the question is symmetric "relation between chair and chair", it is ambiguous without further grounded cues
+            # or unless the question phrasing distinguishes them (e.g. "chair near door").
+            # But here `focus_a` is just "chair".
+            #
+            # The user asks: "In training, is selecting 0,1 different from 1,0? Does inference consistency ensure this?"
+            # Yes, [0,1] means A=obj0, B=obj1. [1,0] means A=obj1, B=obj0.
+            # `geom.relation_4way(A, B)` computes A relative to B.
+            # If order flips, relation direction flips (Left vs Right).
+            # 
+            # In inference:
+            # If intent focus is "target": ["chair", "table"], then focus_a="chair", focus_b="table".
+            # `a_hits` gets chair indices, `b_hits` gets table indices. Distinct. No overlapping issue.
+            #
+            # If intent focus is "target": ["chair", "chair"].
+            # `a_hits` = `b_hits` = [idx1, idx2].
+            # `a_idx` = idx1. `b_idx` sets to idx2.
+            # We assume the user query order "chair A... chair B" maps to detected list order?
+            # Or mapped to `focus` list order?
+            # The code: `focus_a = target[0]`, `focus_b = target[1]`.
+            # So if query is "relation between X and Y", `focus` should reflect [X, Y].
+            # `a_idx` will match X, `b_idx` will match Y.
+            #
+            # IMPORTANT: The current implementation assigns `a_idx` from the first match of X, 
+            # and `b_idx` from first match of Y.
+            # If X and Y are same string "chair", we typically get A=idx1, B=idx2.
+            # If the ground truth was "Relation between Chair_2(Y) and Chair_1(X)", 
+            # but we parse X="chair", Y="chair", we get A=idx1, B=idx2.
+            # This is a limitation of ambiguity in text labels.
+            # But assuming distinct labels or standard reading order, this logic holds.
+            #
+            # Constraint: ensuring we don't accidentally swap them if labels differ.
+            # `focus_a` comes from `target[0]`. `focus_b` from `target[1]`.
+            # This preserves order from the intent output.
+            
             objA = search_space[a_idx] if 0 <= a_idx < len(search_space) else {}
             objB = search_space[b_idx] if 0 <= b_idx < len(search_space) else {}
             bbA = objA.get("BoundingBox")
@@ -987,7 +1050,7 @@ class Agent3D:
             tool_res_str = rel_ans
             final_text = tool_res_str
             text_fixed, _ = self.reflection_fix(task_inferred, intent, det_topk, [a_idx, b_idx], final_text)
-            return text_fixed
+            return text_fixed, intent
 
         # Step2: review/select (MULTIMODAL MLLM)
         review = self.mllm_review_multimodal(task_inferred, query, pcl_paths, det_topk, intent)
@@ -998,7 +1061,14 @@ class Agent3D:
         text = "unknown"
 
         if task_inferred == "Counting":
-            count_res = len(selected) if selected else 0
+            # count_res = len(selected) if selected else 0
+            if selected:
+                count_res = len(selected)
+            elif det_topk:
+                count_res = len(det_topk)
+            else:
+                count_res = 0
+
             tgt = intent.get("focus", {}).get("target", "") or "object"
             tool_res_str = f"Tool=COUNT\nTarget={tgt}\ncount_all={count_res}\nfinal_count={count_res}"
             
@@ -1025,7 +1095,7 @@ class Agent3D:
         
         # Reflection: one-shot validation + fallback
         text_fixed, _ = self.reflection_fix(task_inferred, intent, det_topk, selected, text)
-        return text_fixed
+        return text_fixed, intent
 
     def mllm_finish(self, task_type: str, user_question: str, tool2_result_text: str, pcl_paths, obj_list, intent=None, review=None) -> str:
         def _simplify_bbox_numbers(s: str) -> str:
@@ -1051,6 +1121,11 @@ class Agent3D:
         # 1. Retrieve Intent Context
         intent_prompt_str = intent.get("prompt", "") if intent else ""
         intent_output_str = intent.get("raw", "") if intent else ""
+        # Remove 'args' from intent output string to clean up history
+        import re
+        if intent_output_str:
+            intent_output_str = re.sub(r',\s*"args":\s*\{[^}]*\}', '', intent_output_str)
+            intent_output_str = re.sub(r'"args":\s*\{[^}]*\},\s*', '', intent_output_str) 
 
         # 2. Build Review Context (MUST MATCH mllm_review_multimodal)
         review_context_user = (
@@ -1062,6 +1137,10 @@ class Agent3D:
             # "Output ONE JSON only.\n"
         )
         review_output_str = review.get("raw", "") if review else ""
+        # Remove 'args' from review output string
+        if review_output_str:
+            review_output_str = re.sub(r',\s*"args":\s*\{[^}]*\}', '', review_output_str)
+            review_output_str = re.sub(r'"args":\s*\{[^}]*\},\s*', '', review_output_str)
 
         # 3. Build Finish Context
         finish_context_user = (
@@ -1111,12 +1190,12 @@ class Agent3D:
 # -------------------------
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--task_type', type=str, default='RoomDetection',
+    parser.add_argument('--task_type', type=str, default='Counting',
                         choices=['VisualGrounding_plus', 'Counting', 'RoomDetection', 'PositionRelation'])
     parser.add_argument('--base-data-path', type=str, default='/data/HTC/Data/dataset/Benchmark/data')
     # Default to repo-local answers/ to avoid writing outside workspace (cwd-dependent).
     parser.add_argument('--answers-dir', type=str, default='/data/HTC/Project/llm/answers')
-    parser.add_argument('--gpu', type=int, default=1)
+    parser.add_argument('--gpu', type=int, default=0)
 
     # model paths (align with inference_3d.py)
     parser.add_argument('--encoder_pretrain', type=str, default='epcl', choices=('clip', 'epcl'))
@@ -1124,7 +1203,8 @@ def parse_args():
                         default='/data/HTC/Data/model_zoo/epcl_ckpt/epcl_scannet_vit-L-14_256tokens_latest.pth')
     parser.add_argument('--vicuna_ckpt_path', type=str, default='/data/HTC/Data/model_zoo/vicuna-7b/Vicuna_7B_v0')
     # parser.add_argument('--delta_ckpt_path', type=str, default='/data/HTC/Data/model_zoo/llm_exe/agent_v2_pos/pytorch_model.pt')
-    parser.add_argument('--delta_ckpt_path', type=str, default='/data/HTC/Data/model_zoo/llm_exe/agent_demo_v2/pytorch_model.pt')
+    # parser.add_argument('--delta_ckpt_path', type=str, default='/data/HTC/Data/model_zoo/llm_exe/agent/pytorch_model.pt')
+    parser.add_argument('--delta_ckpt_path', type=str, default='/data/HTC/Data/model_zoo/llm_exe/agent_100sample/pytorch_model.pt')
 
     parser.add_argument('--train_stage', type=int, default=2)
     parser.add_argument('--stage', type=int, default=2)
@@ -1384,13 +1464,14 @@ def main():
             obj_list = det_tool.proposals_for_scene(pcl_paths[0], idx)
 
             start = time.time() 
-            text = agent.solve(args.task_type, data_item, obj_list)
+            text, intent_res = agent.solve(args.task_type, data_item, obj_list)
             elapsed = time.time() - start
 
             ans = {
                 'id': data_item['id'][0] if isinstance(data_item['id'], list) else data_item['id'],
                 'pcl': pcl_paths,
                 'text': text,
+                'intent': intent_res,
                 # 'delta_path': args.delta_ckpt_path,
             }
             fout.write(json.dumps(ans) + '\n')
