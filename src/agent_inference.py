@@ -941,6 +941,7 @@ class Agent3D:
                 # Fallback: just pick something else
                 b_idx = 1 if a_idx == 0 else 0
             
+            """
             # NOTE on Ordering:
             # Training data (CreatGT) generates question "Relation between A and B?" 
             # and may select indices [idxA, idxB] OR [idxB, idxA] depending on filtering sort order?
@@ -1002,7 +1003,8 @@ class Agent3D:
             # Constraint: ensuring we don't accidentally swap them if labels differ.
             # `focus_a` comes from `target[0]`. `focus_b` from `target[1]`.
             # This preserves order from the intent output.
-            
+            """
+
             objA = search_space[a_idx] if 0 <= a_idx < len(search_space) else {}
             objB = search_space[b_idx] if 0 <= b_idx < len(search_space) else {}
             bbA = objA.get("BoundingBox")
@@ -1190,7 +1192,7 @@ class Agent3D:
 # -------------------------
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--task_type', type=str, default='Counting',
+    parser.add_argument('--task_type', type=str, default='VisualGrounding_plus',
                         choices=['VisualGrounding_plus', 'Counting', 'RoomDetection', 'PositionRelation'])
     parser.add_argument('--base-data-path', type=str, default='/data/HTC/Data/dataset/Benchmark/data')
     # Default to repo-local answers/ to avoid writing outside workspace (cwd-dependent).
@@ -1202,9 +1204,9 @@ def parse_args():
     parser.add_argument('--encoder_ckpt_path', type=str,
                         default='/data/HTC/Data/model_zoo/epcl_ckpt/epcl_scannet_vit-L-14_256tokens_latest.pth')
     parser.add_argument('--vicuna_ckpt_path', type=str, default='/data/HTC/Data/model_zoo/vicuna-7b/Vicuna_7B_v0')
-    # parser.add_argument('--delta_ckpt_path', type=str, default='/data/HTC/Data/model_zoo/llm_exe/agent_v2_pos/pytorch_model.pt')
-    # parser.add_argument('--delta_ckpt_path', type=str, default='/data/HTC/Data/model_zoo/llm_exe/agent/pytorch_model.pt')
-    parser.add_argument('--delta_ckpt_path', type=str, default='/data/HTC/Data/model_zoo/llm_exe/agent_100sample/pytorch_model.pt')
+    # parser.add_argument('--delta_ckpt_path', type=str, default='/data/HTC/Data/model_zoo/llm_exe/agent_v2_pos/pytorch_model.pt')  #实验版本
+    # parser.add_argument('--delta_ckpt_path', type=str, default='/data/HTC/Data/model_zoo/llm_exe/agent/pytorch_model.pt')   #实验版本
+    parser.add_argument('--delta_ckpt_path', type=str, default='/data/HTC/Data/model_zoo/llm_exe/agent_v3/pytorch_model.pt')  #完整agent版本
 
     parser.add_argument('--train_stage', type=int, default=2)
     parser.add_argument('--stage', type=int, default=2)
