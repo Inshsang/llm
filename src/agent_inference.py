@@ -8,6 +8,7 @@ import argparse
 import json
 import os
 import time
+import re
 from typing import Any, Dict, List, Optional, Tuple
 
 import torch
@@ -520,6 +521,79 @@ class Agent3D:
                     break
         return hits
 
+    @staticmethod
+    def _extract_counting_options_from_query(query: str) -> List[int]:
+        """Extract numeric multiple-choice candidates from query text."""
+        if not isinstance(query, str) or not query.strip():
+            return []
+
+        text = query
+        options: List[int] = []
+
+        # Patterns like: A. 1 / B) 2 / C：3 / (D) 4
+        lettered_patterns = [
+            r"(?:^|\s)[A-Za-z][\.:：\)\]]\s*(-?\d+)(?=$|\s|[,，;；])",
+            r"\([A-Za-z]\)\s*(-?\d+)(?=$|\s|[,，;；])",
+            r"[A-Za-z]\s*[-—]\s*(-?\d+)(?=$|\s|[,，;；])",
+        ]
+        for p in lettered_patterns:
+            for m in re.finditer(p, text):
+                try:
+                    options.append(int(m.group(1)))
+                except Exception:
+                    continue
+
+        # Patterns like: 选项1: 3 / 选项A: 5
+        for m in re.finditer(r"选项\s*[A-Za-z0-9一二三四五六七八九十]*\s*[:：]\s*(-?\d+)", text):
+            try:
+                options.append(int(m.group(1)))
+            except Exception:
+                continue
+
+        # Fallback: parse numbers in a likely options segment.
+        if not options:
+            seg_match = re.search(r"(?:options?|choices?|候选|可选|选项)\s*[:：](.*)", text, flags=re.IGNORECASE | re.DOTALL)
+            candidate_seg = seg_match.group(1) if seg_match else text
+            nums = [int(x) for x in re.findall(r"(?<![\d.])-?\d+(?![\d.])", candidate_seg)]
+            # Keep this conservative to avoid grabbing unrelated ids.
+            if 2 <= len(nums) <= 12:
+                options.extend(nums)
+
+        if not options:
+            return []
+
+        uniq_sorted = sorted(set(options))
+        return uniq_sorted
+
+    @staticmethod
+    def _extract_first_int(text: str) -> Optional[int]:
+        if not isinstance(text, str):
+            return None
+        m = re.search(r"(?<![\d.])-?\d+(?![\d.])", text)
+        if not m:
+            return None
+        try:
+            return int(m.group(0))
+        except Exception:
+            return None
+
+    def _fallback_counting_to_nearest_option(self, query: str, model_text: str, estimated_count: int) -> Tuple[str, bool, Optional[int], List[int]]:
+        """
+        If counting answer is not in query options, snap to nearest numeric option.
+        Returns: (final_text, used_fallback, chosen_option, options)
+        """
+        options = self._extract_counting_options_from_query(query)
+        if not options:
+            return (model_text, False, None, [])
+
+        pred_num = self._extract_first_int(model_text)
+        if pred_num is not None and pred_num in options:
+            return (model_text, False, pred_num, options)
+
+        anchor = pred_num if pred_num is not None else int(estimated_count)
+        chosen = min(options, key=lambda x: abs(x - anchor))
+        return (str(chosen), True, chosen, options)
+
     # ----------- Stage 1: intent/plan (text is OK, but still using same MLLM core) -----------
     def mllm_intent(self, query: str, pcl_paths, obj_list) -> Dict[str, Any]:
         """
@@ -572,6 +646,7 @@ class Agent3D:
                 {"tool": "FINISH"},
             ],
             "raw": raw,
+            "parse_error": not js,
         }
 
         return out
@@ -677,7 +752,7 @@ class Agent3D:
             "raw": raw,
             "parse_error": False,
         }
-        if isinstance(js, dict):
+        if isinstance(js, dict) and js:
             if isinstance(js.get("summary", ""), str):
                 review["summary"] = js.get("summary", "")
             if isinstance(js.get("need_tool2", None), bool):
@@ -751,11 +826,15 @@ class Agent3D:
 
     # ----------- one-shot reflection (validation + fallback) -----------
     def reflection_fix(self, task_type: str, intent: Dict[str, Any], det_topk: List[Dict[str, Any]],
-                       selected: List[int], text: str) -> Tuple[str, Dict[str, Any]]:
+                       selected: List[int], text: str, has_parse_error: bool = False) -> Tuple[str, Dict[str, Any]]:
         trace = {"applied": False, "reason": ""}
 
         if self.args.wo_reflection:
             return text, trace
+
+        if has_parse_error:
+            trace["applied"] = True
+            trace["reason"] = "parse_error_fallback"
 
         if task_type == "Counting":
             return text.strip(), trace
@@ -764,22 +843,27 @@ class Agent3D:
             return text.strip(), trace
 
         if task_type in {"VisualGrounding_plus", "RoomDetection"}:
-            if "[" in text and "]" in text:
-                return text, trace
-            # fallback: use top-1 bbox
-            if det_topk and det_topk[0].get("BoundingBox") is not None:
-                bb = det_topk[0]["BoundingBox"]
-                trace["applied"] = True
-                trace["reason"] = "bbox_missing_fallback_top1"
-                if task_type == "RoomDetection":
-                    room_label = intent.get("focus", {}).get("room_type", "") or "unknown"
-                    return f"{room_label} {bb}", trace
-                return str(bb), trace
+            # 使用更严格的正则判断：中括号内必须包含数字坐标
+            # (形如 [1.0, 2.5] 或者 [-1, 2, 3] 等，包含至少一个逗号或数字)
+            import re
+            if not re.search(r'\[\s*-?\d+\.?\d*(\s*,\s*-?\d+\.?\d*)*\s*\]', text):
+                # fallback: use top-1 bbox
+                if det_topk and det_topk[0].get("BoundingBox") is not None:
+                    bb = det_topk[0]["BoundingBox"]
+                    trace["applied"] = True
+                    # Combine reasons if parse error also occurred
+                    trace["reason"] = trace["reason"] + "|bbox_missing" if trace["reason"] else "bbox_missing_fallback_top1"
+                    if task_type != "RoomDetection":
+                        return str(bb), trace
+            
+            # If RoomDetection but has format or parse issues, just record it but don't alter the text response
+            return text, trace
 
         return text, trace
 
     # ----------- main solve loop -----------
-    def solve(self, task_type: str, data_item: Dict[str, Any], obj_list: List[Dict[str, Any]]) -> Tuple[str, Dict[str, Any]]:
+    def solve(self, task_type: str, data_item: Dict[str, Any], obj_list: List[Dict[str, Any]]) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
+        metrics = {}
         query = data_item['query'][0] if isinstance(data_item['query'], list) else data_item['query']
         if isinstance(query, str):
             query = query.strip()
@@ -800,16 +884,24 @@ class Agent3D:
                 temperature=1e-5,
             )
             text = direct[0] if isinstance(direct, list) and direct else str(direct)
-            return text, {}
+            return text, {}, {}
         
-        if task_type == "RoomDetection":
-            query = "Locate the locations of every room within the scene."
+        # if task_type == "RoomDetection":
+        #     query = "Locate the locations of every room within the scene."
 
         # Step1: intent (plan tool calls)
         intent = self.mllm_intent(query, pcl_paths, obj_list=obj_list[:self.args.max_obj])
 
         # task_inferred = intent.get("task", task_type) or task_type
         task_inferred = task_type
+        metrics["task_inferred"] = task_inferred
+        metrics["tool_plan"] = intent.get('tool_plan', [])
+        metrics["parse_error"] = intent.get("parse_error", False)
+        
+        print(f"[过程数据] 任务识别: {task_inferred}")
+        print(f"[过程数据] 工具选择: {intent.get('tool_plan', [])}")
+        if metrics["parse_error"]:
+            print(f"[过程数据] 阶段: Intent, 解析失败, 当前输出: {intent.get('raw', '')}")
 
         # Tool1: DETECT (reuse)
         all_objs = obj_list or []
@@ -888,13 +980,75 @@ class Agent3D:
 
         if not det_topk:
             # hard fallback
+            print(f"[过程数据] 阶段: Detect, 触发兜底: 无候选物体")
             if task_type == "Counting":
                 return "1", intent
             return "unknown", intent
 
-        # Special-case: PositionRelation should IGNORE review-selected indices.
-        # Use Intent focus(A,B) directly, then compute relation from detection bboxes.
-        if task_inferred == "PositionRelation":
+
+
+
+        # Step2: review/select (MULTIMODAL MLLM)
+        review = self.mllm_review_multimodal(task_inferred, query, pcl_paths, det_topk, intent)
+
+        selected = review.get("selected_object_indices", [])
+        metrics["num_selected_instances"] = len(selected)
+        metrics["parse_error"] = metrics.get("parse_error", False) or review.get("parse_error", False)
+        
+        print(f"[过程数据] 实例选择: {selected}")
+        if review.get("parse_error"):
+            print(f"[过程数据] 阶段: Review, 解析失败, 当前输出: {review.get('raw', '')}")
+
+        # Tool2 decision (fixed budget)
+        text = "unknown"
+
+        if task_inferred == "Counting":
+            # count_res = len(selected) if selected else 0
+            if selected:
+                count_res = len(selected)
+            elif det_topk:
+                count_res = len(det_topk)
+            else:
+                count_res = 0
+
+            tgt = intent.get("focus", {}).get("target", "") or "object"
+            tool_res_str = f"Tool=COUNT\nTarget={tgt}\ncount_all={count_res}\nfinal_count={count_res}"
+            
+            final_text = self.mllm_finish(task_inferred, query, tool_res_str, pcl_paths, det_topk, intent=intent, review=review)
+            text, used_count_option_fallback, chosen_option, query_options = self._fallback_counting_to_nearest_option(
+                query=query,
+                model_text=final_text,
+                estimated_count=count_res,
+            )
+            if used_count_option_fallback:
+                metrics["fallback_used"] = True
+                metrics["fallback_reason"] = "count_answer_out_of_options_nearest"
+                metrics["count_query_options"] = query_options
+                metrics["count_fallback_choice"] = chosen_option
+                print(
+                    f"[过程数据] 阶段: Counting, 触发兜底: answer_not_in_options, "
+                    f"options={query_options}, chosen={chosen_option}"
+                )
+
+
+        elif task_inferred == "VisualGrounding_plus":
+            if len(selected) != 1:
+                tgt = intent.get("focus", {}).get("target", "")
+                hits = self._find_by_keywords_fallback(det_topk, [tgt] if tgt else [])
+                selected = [hits[0]] if hits else [0]
+            
+            idx = selected[0]
+            tool_res_str = "Tool=FINISH\n(ready)"
+            
+            final_text = self.mllm_finish(task_inferred, query, tool_res_str, pcl_paths, det_topk, intent=intent, review=review)
+            text = final_text
+
+        elif task_inferred == "RoomDetection":
+            tool_res_str = "Tool=FINISH\n(ready)"
+            final_text = self.mllm_finish(task_inferred, query, tool_res_str, pcl_paths, det_topk, intent=intent, review=review)
+            text = final_text
+
+        elif task_inferred == "PositionRelation":
             focus = intent.get("focus", {}) if isinstance(intent, dict) else {}
             focus_a = str(focus.get("A", "") or "").strip()
             focus_b = str(focus.get("B", "") or "").strip()
@@ -926,178 +1080,96 @@ class Agent3D:
             b_hits = _find_matches(search_space, focus_b)
 
             # Fallback if intent missing or no hits.
+            fallback_applied = False
+            fallback_reason = []
             if not a_hits:
                 a_hits = list(range(len(search_space)))
+                fallback_applied = True
+                fallback_reason.append("A_not_found")
             if not b_hits:
                 b_hits = list(range(len(search_space)))
-
-            a_idx = a_hits[0] if a_hits else 0
-            b_idx = b_hits[0] if b_hits else (1 if len(search_space) > 1 else 0)
+                fallback_applied = True
+                fallback_reason.append("B_not_found")
             
-            # If A and B are the same instance/index, try to pick a different B if possible
-            if b_idx == a_idx and len(b_hits) > 1:
-                b_idx = b_hits[1]
-            if b_idx == a_idx and len(search_space) > 1:
-                # Fallback: just pick something else
-                b_idx = 1 if a_idx == 0 else 0
-            
-            """
-            # NOTE on Ordering:
-            # Training data (CreatGT) generates question "Relation between A and B?" 
-            # and may select indices [idxA, idxB] OR [idxB, idxA] depending on filtering sort order?
-            # Actually CreatGT logic:
-            #   hits = sorted([...])
-            #   new_a_idx = hits.index(a_idx)
-            #   new_b_idx = hits.index(b_idx)
-            # So the indices in 'selected_object_indices' will be relative to det_filtered.
-            # BUT the inference logic here in PositionRelation block *ignores* 'selected_object_indices'
-            # and re-computes `a_idx` and `b_idx` from keywords directly.
-            #
-            # Crucially, `_find_matches` returns indices in ascending order (if det_topk is sorted, which it is from `hits` sort in CreatGT-mirror logic).
-            # If `focus_a` == `focus_b` (e.g. "chair" vs "chair"), `a_hits` and `b_hits` are identical lists.
-            # Then `a_idx = a_hits[0]`, `b_idx = b_hits[0]` -> same object.
-            # The logic above fixes `b_idx` to `b_hits[1]` if possible.
-            #
-            # However, does "Relation between Chair A and Chair B" imply a specific instance order?
-            # In CreatGT, `a_idx` and `b_idx` are chosen randomly from unique instances.
-            # The Question prompts with `{C1}` and `{C2}` where names might be same.
-            # If names are same, ambiguity exists.
-            # If names differ (e.g. "bed" and "table"), `find_matches` distinguishes them.
-            #
-            # Issue: If `a_norm` == `b_norm` (e.g. two chairs), CreatGT picks two distinct specific instances.
-            # Inference receives just "chair" and "chair". 
-            # `find_matches` returns [chair1_idx, chair2_idx, ...].
-            # `a_idx` takes chair1_idx. `b_idx` takes chair2_idx (via fix).
-            # This order [0, 1] is deterministic.
-            # But the ground truth might have been relation(chair2, chair1).
-            # If the question is symmetric "relation between chair and chair", it is ambiguous without further grounded cues
-            # or unless the question phrasing distinguishes them (e.g. "chair near door").
-            # But here `focus_a` is just "chair".
-            #
-            # The user asks: "In training, is selecting 0,1 different from 1,0? Does inference consistency ensure this?"
-            # Yes, [0,1] means A=obj0, B=obj1. [1,0] means A=obj1, B=obj0.
-            # `geom.relation_4way(A, B)` computes A relative to B.
-            # If order flips, relation direction flips (Left vs Right).
-            # 
-            # In inference:
-            # If intent focus is "target": ["chair", "table"], then focus_a="chair", focus_b="table".
-            # `a_hits` gets chair indices, `b_hits` gets table indices. Distinct. No overlapping issue.
-            #
-            # If intent focus is "target": ["chair", "chair"].
-            # `a_hits` = `b_hits` = [idx1, idx2].
-            # `a_idx` = idx1. `b_idx` sets to idx2.
-            # We assume the user query order "chair A... chair B" maps to detected list order?
-            # Or mapped to `focus` list order?
-            # The code: `focus_a = target[0]`, `focus_b = target[1]`.
-            # So if query is "relation between X and Y", `focus` should reflect [X, Y].
-            # `a_idx` will match X, `b_idx` will match Y.
-            #
-            # IMPORTANT: The current implementation assigns `a_idx` from the first match of X, 
-            # and `b_idx` from first match of Y.
-            # If X and Y are same string "chair", we typically get A=idx1, B=idx2.
-            # If the ground truth was "Relation between Chair_2(Y) and Chair_1(X)", 
-            # but we parse X="chair", Y="chair", we get A=idx1, B=idx2.
-            # This is a limitation of ambiguity in text labels.
-            # But assuming distinct labels or standard reading order, this logic holds.
-            #
-            # Constraint: ensuring we don't accidentally swap them if labels differ.
-            # `focus_a` comes from `target[0]`. `focus_b` from `target[1]`.
-            # This preserves order from the intent output.
-            """
-
-            objA = search_space[a_idx] if 0 <= a_idx < len(search_space) else {}
-            objB = search_space[b_idx] if 0 <= b_idx < len(search_space) else {}
-            bbA = objA.get("BoundingBox")
-            bbB = objB.get("BoundingBox")
-
-            nameA = focus_a or _obj_name(objA) or "object"
-            nameB = focus_b or _obj_name(objB) or "object"
-
-            qid, flip = (60, 0)  # default to a stable direction
-            if isinstance(bbA, list) and isinstance(bbB, list) and len(bbA) == 6 and len(bbB) == 6:
-                qid, flip = self.geom.relation_4way(bbA, bbB)
-                if qid == 0:
-                    qid, flip = (60, 0)
-
-            # Pick a template if available; otherwise use a simple fallback sentence.
-            tpl = ""
-            if self.pos_rel_templates and qid > 0:
-                # Prefer exact key, then search forward within the usual +[0..29] range.
-                tpl = self.pos_rel_templates.get(str(qid), "")
-                if not tpl:
-                    for off in range(1, 30):
-                        tpl = self.pos_rel_templates.get(str(qid + off), "")
-                        if tpl:
-                            break
-
-            if flip:
-                nameA, nameB = nameB, nameA
-
-            if tpl:
-                rel_ans = tpl.replace("C1", nameA).replace("C2", nameB).strip()
+            if fallback_applied:
+                metrics["fallback_used"] = True
+                metrics["fallback_reason"] = ",".join(fallback_reason)
+                print(f"[过程数据] 阶段: PositionRelation, 触发兜底: {metrics['fallback_reason']}")
+                # If target objects are completely missing, computing a random relation is meaningless.
+                text = "unknown"
+                metrics["output_failed"] = True
             else:
-                rel_map = {
-                    30: "right",
-                    60: "left",
-                    90: "front",
-                    120: "behind",
-                    150: "front-left",
-                    180: "front-right",
-                    210: "below",
-                    240: "above",
-                }
-                rel = rel_map.get(qid, "near")
-                rel_ans = f"The {nameA} is to the {rel} of {nameB}."
-            
-            tool_res_str = rel_ans
-            final_text = tool_res_str
-            text_fixed, _ = self.reflection_fix(task_inferred, intent, det_topk, [a_idx, b_idx], final_text)
-            return text_fixed, intent
+                a_idx = a_hits[0] if a_hits else 0
+                b_idx = b_hits[0] if b_hits else (1 if len(search_space) > 1 else 0)
+                
+                # If A and B are the same instance/index, try to pick a different B if possible
+                if b_idx == a_idx and len(b_hits) > 1:
+                    b_idx = b_hits[1]
+                if b_idx == a_idx and len(search_space) > 1:
+                    # Fallback: just pick something else
+                    b_idx = 1 if a_idx == 0 else 0
+                
+                # Update selected indices for reflection
+                selected = [a_idx, b_idx]
 
-        # Step2: review/select (MULTIMODAL MLLM)
-        review = self.mllm_review_multimodal(task_inferred, query, pcl_paths, det_topk, intent)
+                objA = search_space[a_idx] if 0 <= a_idx < len(search_space) else {}
+                objB = search_space[b_idx] if 0 <= b_idx < len(search_space) else {}
+                bbA = objA.get("BoundingBox")
+                bbB = objB.get("BoundingBox")
 
-        selected = review.get("selected_object_indices", [])
+                nameA = focus_a or _obj_name(objA) or "object"
+                nameB = focus_b or _obj_name(objB) or "object"
 
-        # Tool2 decision (fixed budget)
-        text = "unknown"
+                qid, flip = (60, 0)  # default to a stable direction
+                if isinstance(bbA, list) and isinstance(bbB, list) and len(bbA) == 6 and len(bbB) == 6:
+                    qid, flip = self.geom.relation_4way(bbA, bbB)
+                    if qid == 0:
+                        qid, flip = (60, 0)
 
-        if task_inferred == "Counting":
-            # count_res = len(selected) if selected else 0
-            if selected:
-                count_res = len(selected)
-            elif det_topk:
-                count_res = len(det_topk)
-            else:
-                count_res = 0
+                # Pick a template if available; otherwise use a simple fallback sentence.
+                tpl = ""
+                if self.pos_rel_templates and qid > 0:
+                    # Prefer exact key, then search forward within the usual +[0..29] range.
+                    tpl = self.pos_rel_templates.get(str(qid), "")
+                    if not tpl:
+                        for off in range(1, 30):
+                            tpl = self.pos_rel_templates.get(str(qid + off), "")
+                            if tpl:
+                                break
 
-            tgt = intent.get("focus", {}).get("target", "") or "object"
-            tool_res_str = f"Tool=COUNT\nTarget={tgt}\ncount_all={count_res}\nfinal_count={count_res}"
-            
-            final_text = self.mllm_finish(task_inferred, query, tool_res_str, pcl_paths, det_topk, intent=intent, review=review)
-            text = final_text
+                if flip:
+                    nameA, nameB = nameB, nameA
 
-
-        elif task_inferred == "VisualGrounding_plus":
-            if len(selected) != 1:
-                tgt = intent.get("focus", {}).get("target", "")
-                hits = self._find_by_keywords_fallback(det_topk, [tgt] if tgt else [])
-                selected = [hits[0]] if hits else [0]
-            
-            idx = selected[0]
-            tool_res_str = "Tool=FINISH\n(ready)"
-            
-            final_text = self.mllm_finish(task_inferred, query, tool_res_str, pcl_paths, det_topk, intent=intent, review=review)
-            text = final_text
-
-        elif task_inferred == "RoomDetection":
-            tool_res_str = "Tool=FINISH\n"
-            final_text = self.mllm_finish(task_inferred, query, " ", pcl_paths, det_topk, intent=intent, review=review)
-            text = final_text
+                if tpl:
+                    rel_ans = tpl.replace("C1", nameA).replace("C2", nameB).strip()
+                else:
+                    rel_map = {
+                        30: "right",
+                        60: "left",
+                        90: "front",
+                        120: "behind",
+                        150: "front-left",
+                        180: "front-right",
+                        210: "below",
+                        240: "above",
+                    }
+                    rel = rel_map.get(qid, "near")
+                    rel_ans = f"The {nameA} is to the {rel} of {nameB}."
+                
+                tool_res_str = rel_ans
+                final_text = self.mllm_finish(task_inferred, query, tool_res_str, pcl_paths, det_topk, intent=intent, review=review)
+                text = final_text
         
         # Reflection: one-shot validation + fallback
-        text_fixed, _ = self.reflection_fix(task_inferred, intent, det_topk, selected, text)
-        return text_fixed, intent
+        text_fixed, trace = self.reflection_fix(task_inferred, intent, det_topk, selected, text)
+        if trace and trace.get("applied", False):
+            metrics["fallback_used"] = True
+            print(f"[过程数据] 阶段: Reflection, 触发兜底修复, 原始输出: {text}")
+        else:
+            metrics["fallback_used"] = False
+        if text_fixed in ["unknown", "None", "", None]:
+            metrics["output_failed"] = True
+        return text_fixed, intent, metrics
 
     def mllm_finish(self, task_type: str, user_question: str, tool2_result_text: str, pcl_paths, obj_list, intent=None, review=None) -> str:
         def _simplify_bbox_numbers(s: str) -> str:
@@ -1192,7 +1264,7 @@ class Agent3D:
 # -------------------------
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--task_type', type=str, default='VisualGrounding_plus',
+    parser.add_argument('--task_type', type=str, default='Counting',
                         choices=['VisualGrounding_plus', 'Counting', 'RoomDetection', 'PositionRelation'])
     parser.add_argument('--base-data-path', type=str, default='/data/HTC/Data/dataset/Benchmark/data')
     # Default to repo-local answers/ to avoid writing outside workspace (cwd-dependent).
@@ -1206,7 +1278,8 @@ def parse_args():
     parser.add_argument('--vicuna_ckpt_path', type=str, default='/data/HTC/Data/model_zoo/vicuna-7b/Vicuna_7B_v0')
     # parser.add_argument('--delta_ckpt_path', type=str, default='/data/HTC/Data/model_zoo/llm_exe/agent_v2_pos/pytorch_model.pt')  #实验版本
     # parser.add_argument('--delta_ckpt_path', type=str, default='/data/HTC/Data/model_zoo/llm_exe/agent/pytorch_model.pt')   #实验版本
-    parser.add_argument('--delta_ckpt_path', type=str, default='/data/HTC/Data/model_zoo/llm_exe/agent_v3/pytorch_model.pt')  #完整agent版本
+    # parser.add_argument('--delta_ckpt_path', type=str, default='/data/HTC/Data/model_zoo/llm_exe/agent_v3/pytorch_model.pt')  #完整agent版本
+    parser.add_argument('--delta_ckpt_path', type=str, default='/data/HTC/Data/model_zoo/llm_exe/agent/pytorch_model.pt')  #完整agent版本
 
     parser.add_argument('--train_stage', type=int, default=2)
     parser.add_argument('--stage', type=int, default=2)
@@ -1466,14 +1539,14 @@ def main():
             obj_list = det_tool.proposals_for_scene(pcl_paths[0], idx)
 
             start = time.time() 
-            text, intent_res = agent.solve(args.task_type, data_item, obj_list)
+            text, intent_res, metrics = agent.solve(args.task_type, data_item, obj_list)
             elapsed = time.time() - start
 
             ans = {
                 'id': data_item['id'][0] if isinstance(data_item['id'], list) else data_item['id'],
                 'pcl': pcl_paths,
                 'text': text,
-                'intent': intent_res,
+                'metrics': metrics,
                 # 'delta_path': args.delta_ckpt_path,
             }
             fout.write(json.dumps(ans) + '\n')

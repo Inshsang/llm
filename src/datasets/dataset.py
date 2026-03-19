@@ -335,8 +335,24 @@ class LAMMDataset(Dataset):
         class_map = json.load(open("/data/HTC/Project/Point-BERT/data/ModelNet/modelnet40_normal_resampled/my_train.json"))
         # self.map_class2points = {vision_root_path+'/object_npy/'+class_map[i]+".npy": "/media/kou/Data3/htc/Objects_8192_npy/points/" + str(i) + ".npy" for i in range(len(class_map))}
         # self.map_class2labels = {vision_root_path+'/object_npy/'+class_map[i]+".npy": "/media/kou/Data3/htc/Objects_8192_npy/labels/" + str(i) + ".npy" for i in range(len(class_map))}
-        self.map_class2points = {vision_root_path+'/Objects/'+class_map[i]+".npy": vision_root_path + '/object_1024_npy/' + class_map[i] + ".npy" for i in range(len(class_map))}
-        self.map_class2labels = {vision_root_path+'/Objects/'+class_map[i]+".npy": vision_root_path + '/object_1024_npy/' + class_map[i] + ".npy" for i in range(len(class_map))}
+        self.map_class2points = {}
+        self.map_class2labels = {}
+        class_target_root = '/data/HTC/Data/dataset/object_1024_npy'
+        for i in range(len(class_map)):
+            sample_name = class_map[i]
+            sample_file = sample_name if sample_name.endswith('.npy') else sample_name + '.npy'
+            target_file = os.path.join(class_target_root, sample_file)
+
+            # 兼容历史与当前两种输入路径格式
+            key_variants = [
+                os.path.join(vision_root_path, 'Objects', sample_file),
+                os.path.join(vision_root_path, 'object_1024_npy', sample_file),
+                sample_file,
+                sample_name,
+            ]
+            for key in key_variants:
+                self.map_class2points[key] = target_file
+                self.map_class2labels[key] = target_file
         self.scene_gt = {}
         index = -1
         self.VG = json.load(open("/data/HTC/Data/dataset/Benchmark/Task/GT/VisualGrounding.json", "r"))
@@ -370,24 +386,48 @@ class LAMMDataset(Dataset):
 
     def __getitem__(self, i):
         """get one sample"""
+        task_type = self.task_type_list[i]
+        vision_path = self.vision_path_list[i]
+
+        def _scene_id_from_path(path: str) -> str:
+            stem = os.path.splitext(os.path.basename(path))[0]
+            if stem in self.scene_gt:
+                return stem
+            if '_' in stem:
+                prefix = stem.split('_', 1)[0]
+                if prefix in self.scene_gt:
+                    return prefix
+            digits = ''.join(ch for ch in stem if ch.isdigit())
+            if digits in self.scene_gt:
+                return digits
+            return stem
+
         if self.task_type_list[i] in ['Classification3d','DescriptionObj3d','ConversationObj3d']:#Detection,Counting,'Classification3d',PositionRelation,VG,RoomDetection,Navigation
-            points_path = self.map_class2points[self.vision_path_list[i]]
-            label_path = self.map_class2labels[self.vision_path_list[i]]
-        elif self.task_type_list[i] in ['Detection3d']:
-            points_path = self.scene_gt[self.vision_path_list[i][37:-4]]['Multi_class']
-            label_path = self.scene_gt[self.vision_path_list[i][37:-4]]['classes']
-        elif self.task_type_list[i] in ['Agent3d']:
-            points_path = self.scene_gt[self.vision_path_list[i][29:-4]]['boxes']
-            label_path = self.scene_gt[self.vision_path_list[i][29:-4]]['classes']
-            self.vision_path_list[i] = self.vision_path_list[i][:23] + 'Benchmark/data/scene/' + self.vision_path_list[i][29:-4] + '.ply'
+            key = vision_path
+            if key not in self.map_class2points:
+                key = os.path.basename(key)
+            points_path = self.map_class2points[key]
+            label_path = self.map_class2labels[key]
+        elif task_type in ['Detection3d']:
+            scene_id = _scene_id_from_path(vision_path)
+            points_path = self.scene_gt[scene_id]['Multi_class']
+            label_path = self.scene_gt[scene_id]['classes']
+            vision_path = '/data/HTC/Data/dataset/Benchmark/data/scene/' + scene_id + '.ply'
+        elif task_type in ['Agent3d']:
+            scene_id = _scene_id_from_path(vision_path)
+            points_path = self.scene_gt[scene_id]['boxes']
+            label_path = self.scene_gt[scene_id]['classes']
+            vision_path = '/data/HTC/Data/dataset/Benchmark/data/scene/' + scene_id + '.ply'
         else:
-            points_path = self.scene_gt[self.vision_path_list[i][37:-4]]['boxes']
-            label_path = self.scene_gt[self.vision_path_list[i][37:-4]]['classes']
+            scene_id = _scene_id_from_path(vision_path)
+            points_path = self.scene_gt[scene_id]['boxes']
+            label_path = self.scene_gt[scene_id]['classes']
+            vision_path = '/data/HTC/Data/dataset/Benchmark/data/scene/' + scene_id + '.ply'
         return dict(
-            vision_paths=self.vision_path_list[i],
+            vision_paths=vision_path,
             output_texts=self.caption_list[i],
             vision_type=self.vision_type,
-            task_type=self.task_type_list[i],
+            task_type=task_type,
             points_path = points_path,
             label_path=label_path
         )

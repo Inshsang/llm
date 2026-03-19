@@ -1498,6 +1498,14 @@ def Train_Agent():
     Qr, Ar, GTr, _ = filepath('RoomDetection')
     Q_ROOM, _, GT_ROOM = loading(Qr, Ar, GTr)
 
+    Qd, Ad, GTd, _ = filepath('Detection')
+    Q_DET, _, _ = loading(Qd, Ad, Qd)  # Detection questions
+
+    # Q_Classification is not standard in filepath (often uses direct path in test generation)
+    q_class_path = "/data/HTC/Data/dataset/Benchmark/Task/Template/Q_Classification.json"
+    with open(q_class_path, 'r') as qf:
+        Q_CLASS = json.load(qf)
+
     # Detection proposals
     det_meta_path = "/data/HTC/Data/dataset/Benchmark/Task/GT/Detection.json"
     det_meta = {}
@@ -1741,7 +1749,9 @@ def Train_Agent():
         "VisualGrounding_plus", 
         "Counting", 
         "RoomDetection", 
-        "PositionRelation"
+        "PositionRelation",
+        "Detection",
+        "Classification"
     }
 
     # ENABLE_TASKS = ("PositionRelation")
@@ -2274,7 +2284,108 @@ def Train_Agent():
                 outjson.append(getsinglejson(sid_str, str(sample_id), pcl_path, conversations, "Agent3d"))
                 sample_id += 1
 
+        # -----------------------
+        # 5) Detection
+        # -----------------------
+        if "Detection" in ENABLE_TASKS:
+            # Random question template
+            que_num = random.randint(0, 29)
+            user_q_det = Q_DET.get(str(que_num), "Can you tell me what these items are?") + " With obj0:name0, obj1:name1... form of answers. "
+            
+            # Simple DETECT -> FINISH plan
+            intent_ans_det = {
+                "stage": "intent",
+                "task": "Detection",
+                "focus": {"target": ""},
+                "tool_plan": [
+                    {"tool": "DETECT", "args": {}},
+                    {"tool": "FINISH", "args": {}},
+                ],
+            }
+            
+            # All identified objects
+            review_ans_det = {
+                "stage": "review",
+                "summary": "Output all detected objects in the requested format.",
+                "selected_object_indices": list(range(len(det_topk))),
+                "room_groups": [],
+                "next_tool": {"tool": "FINISH", "args": {}},
+            }
+            
+            # Construct final answer format
+            final_text_parts = []
+            for i, o in enumerate(det_topk):
+                name = (o.get("name", "") or o.get("label", "") or "").lower()
+                final_text_parts.append(f"(obj{i}):{name}!")
+            final_text_det = " ".join(final_text_parts) if final_text_parts else "unknown"
+            
+            conversations_det = [
+                {"from": "human", "value": make_intent_prompt(user_q_det)},
+                {"from": "gpt", "value": json.dumps(intent_ans_det, ensure_ascii=False)},
+                {"from": "human", "value": make_review_prompt(user_q_det, det_topk)},
+                {"from": "gpt", "value": json.dumps(review_ans_det, ensure_ascii=False)},
+                {"from": "human", "value": make_finish_prompt(user_q_det, "Tool=FINISH\n(ready)")},
+                {"from": "gpt", "value": final_text_det},
+            ]
+            outjson.append(getsinglejson(sid_str, str(sample_id), pcl_path, conversations_det, "Agent3d"))
+            sample_id += 1
+
         print(sid, "Agent OK")
+
+    # -----------------------
+    # 6) Classification
+    # -----------------------
+    if "Classification" in ENABLE_TASKS:
+        try:
+            class_train_data = json.load(open("/data/HTC/Data/dataset/object_add/my_train.json"))
+            ALL_names_list = json.load(open("/data/HTC/Data/dataset/object_add/my_names.json", 'r'))
+            
+            for path in class_train_data[:100]:
+                src_id = re.sub(r"_.*","",path)
+                classname = re.sub(r".*\d_", "", path)
+                classname = re.sub(r"\d.*", "", classname)
+                pcl_path = "Objects/"+path+".npy"
+                
+                que_num = random.randint(0, 29)
+                base_q = Q_CLASS.get(str(que_num), "What's the 3D point cloud about?")
+                
+                random_number = random.sample(range(0, len(ALL_names_list)), 5)
+                random_class = [ALL_names_list[i] for i in random_number]
+                while classname in random_class:
+                    random_number = random.sample(range(0, len(ALL_names_list)), 5)
+                    random_class = [ALL_names_list[i] for i in random_number]
+                    
+                answer_pos = random.randint(0, 5)
+                random_class.insert(answer_pos, classname)
+                gt_choices = random_class
+                
+                answer_query = {"0":" (A) ","1":" (B) ","2":" (C) ","3":" (D) ","4":" (E) ","5":" (F) "}
+                query = base_q + " \n Options: "
+                for i_idx, c_name in enumerate(gt_choices):
+                    query += answer_query[str(i_idx)] + c_name
+                    
+                final_answer = answer_query[str(answer_pos)].strip() + " " + classname
+                
+                intent_ans_cls = {
+                    "stage": "intent",
+                    "task": "Classification",
+                    "focus": {"target": ""},
+                    "tool_plan": [
+                        {"tool": "FINISH", "args": {}},
+                    ],
+                }
+                
+                conversations_cls = [
+                    {"from": "human", "value": make_intent_prompt(query)},
+                    {"from": "gpt", "value": json.dumps(intent_ans_cls, ensure_ascii=False)},
+                    {"from": "human", "value": make_finish_prompt(query, "Tool=FINISH\n(ready)")},
+                    {"from": "gpt", "value": final_answer},
+                ]
+                outjson.append(getsinglejson(src_id, str(sample_id), pcl_path, conversations_cls, "Agent3d"))
+                sample_id += 1
+            print("Classification Agent OK")
+        except Exception as e:
+            print(f"Classification Agent error: {e}")
 
     return result, outjson
 
