@@ -773,9 +773,7 @@ class Agent3D:
         task_guess = js.get("task", task_type) if isinstance(js, dict) else task_type
 
         default_plan = [{"tool": "DETECT"}, {"tool": "FINISH"}]
-        if task_type == "Classification":
-            default_plan = [{"tool": "FINISH"}]
-        elif task_type == "Counting":
+        if task_type == "Counting":
             default_plan = [{"tool": "DETECT"}, {"tool": "COUNT"}, {"tool": "FINISH"}]
         elif task_type == "PositionRelation":
             default_plan = [{"tool": "DETECT"}, {"tool": "REL_DIR"}, {"tool": "FINISH"}]
@@ -1031,8 +1029,12 @@ class Agent3D:
         # Build pseudo proposals from options so the 3-stage pipeline can still run.
         if task_type == "Classification" and not obj_list:
             opts = self._extract_classification_options(query)
-            pseudo_name = str(opts[0][1]) if opts else "object"
-            obj_list = [{"name": pseudo_name, "BoundingBox": [0.0, 0.0, 0.0, 1.0, 1.0, 1.0]}]
+            pseudo = []
+            for _, name in opts[:self.args.max_obj]:
+                pseudo.append({"name": str(name), "BoundingBox": [0.0, 0.0, 0.0, 1.0, 1.0, 1.0]})
+            if not pseudo:
+                pseudo = [{"name": "object", "BoundingBox": [0.0, 0.0, 0.0, 1.0, 1.0, 1.0]}]
+            obj_list = pseudo
 
         # Ablation: w/o tool => direct answer (baseline)
         if self.args.wo_tool:
@@ -1432,29 +1434,18 @@ class Agent3D:
         )
 
         # 4. Concatenate History
-        # Classification training is 2-stage only: intent -> finish (no review turn).
-        if task_type == "Classification":
-            if intent_prompt_str and intent_output_str:
-                prompt = (
-                    f"{intent_prompt_str.rstrip()}\n\n"
-                    f"\n### gpt:{intent_output_str}\n###"
-                    f"human: {finish_context_user.rstrip()}\n"
-                )
-            else:
-                prompt = finish_context_user
+        # Format:
+        # <Pcl> [IntentUser] \n### gpt:[IntentOut] \n###human: [ReviewUser] \n### gpt:[ReviewOut] \n###human: [FinishUser] \n### gpt:
+        if intent_prompt_str and intent_output_str and review_output_str:
+            prompt = (
+                f"{intent_prompt_str.rstrip()}\n\n" 
+                f"\n### gpt:{intent_output_str}\n###"
+                f"human: {review_context_user.rstrip()}\n"
+                f"\n### gpt:{review_output_str}\n###"
+                f"human: {finish_context_user.rstrip()}\n"
+            )
         else:
-            # Format:
-            # <Pcl> [IntentUser] \n### gpt:[IntentOut] \n###human: [ReviewUser] \n### gpt:[ReviewOut] \n###human: [FinishUser] \n### gpt:
-            if intent_prompt_str and intent_output_str and review_output_str:
-                prompt = (
-                    f"{intent_prompt_str.rstrip()}\n\n" 
-                    f"\n### gpt:{intent_output_str}\n###"
-                    f"human: {review_context_user.rstrip()}\n"
-                    f"\n### gpt:{review_output_str}\n###"
-                    f"human: {finish_context_user.rstrip()}\n"
-                )
-            else:
-                prompt = finish_context_user
+            prompt = finish_context_user
 
         if getattr(self.args, "debug_prompts", False):
             print("[DEBUG][FINISH_PROMPT]\n" + prompt)
@@ -1575,6 +1566,10 @@ def main():
     model.llama_model = model.llama_model.merge_and_unload()
     model = model.eval().half().to(device)
 
+    # Cache multimodal features to avoid repeated heavy Point-BERT encoding
+    # for identical (pcl_path, obj bbox list) inputs during inference.
+    multimodal_feature_cache = {}
+
     def extract_multimodal_feature_patched(self, inputs):
         """Monkey-patched extract_multimodal_feature to handle batch dimension."""
         # Call the original method (bound to self)
@@ -1597,12 +1592,52 @@ def main():
             if not safe_obj_list:
                 safe_obj_list = [{"name": "object", "BoundingBox": [0.0, 0.0, 0.0, 1.0, 1.0, 1.0]}]
 
-            # Note: We use self.test_encode_pcl which is available on the model instance
-            pcl_embeds, _ = self.test_encode_pcl(
-                resolved_pcl_paths,
-                safe_obj_list[:20], 
-                inputs['list_of_objpoints']
+            safe_obj_list = safe_obj_list[:20]
+
+            def _bbox_key(o):
+                bb = o.get("BoundingBox", None)
+                if isinstance(bb, list) and len(bb) == 6:
+                    return tuple(round(float(x), 4) for x in bb)
+                return None
+
+            cache_key = (
+                tuple(resolved_pcl_paths),
+                tuple(_bbox_key(o) for o in safe_obj_list),
             )
+
+            if cache_key in multimodal_feature_cache:
+                pcl_embeds = multimodal_feature_cache[cache_key]
+            else:
+                # De-duplicate repeated bboxes (common in pseudo proposals)
+                # to reduce expensive Point-BERT forward calls.
+                uniq_objs = []
+                remap = []
+                uniq_index = {}
+                for o in safe_obj_list:
+                    k = _bbox_key(o)
+                    if k is None:
+                        k = ("obj", str(o.get("name", "")))
+                    if k in uniq_index:
+                        remap.append(uniq_index[k])
+                    else:
+                        uniq_index[k] = len(uniq_objs)
+                        remap.append(len(uniq_objs))
+                        uniq_objs.append(o)
+
+                # Note: We use self.test_encode_pcl which is available on the model instance
+                uniq_embeds, _ = self.test_encode_pcl(
+                    resolved_pcl_paths,
+                    uniq_objs,
+                    inputs['list_of_objpoints']
+                )
+
+                if isinstance(uniq_embeds, list):
+                    pcl_embeds = [uniq_embeds[i] for i in remap if 0 <= i < len(uniq_embeds)]
+                else:
+                    pcl_embeds = uniq_embeds
+
+                multimodal_feature_cache[cache_key] = pcl_embeds
+
             # FIX: Unwrap batch dimension so that feature_embeds is [N_obj, Dim]
             # If [1, N, D] -> [N, D]
             if isinstance(pcl_embeds, torch.Tensor) and pcl_embeds.dim() == 3 and pcl_embeds.shape[0] == 1:
