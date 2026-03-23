@@ -140,6 +140,30 @@ def mllm_generate_one(
     return model.generate(inputs)
 
 
+def _resolve_pcl_path(path: str) -> str:
+    """Resolve dataset path drift (objects/ vs object_1024_npy, case variants)."""
+    if not isinstance(path, str) or not path:
+        return path
+    if os.path.exists(path):
+        return path
+
+    norm = path.replace('\\', '/')
+    basename = os.path.basename(norm)
+    candidates = [
+        norm,
+        norm.replace('/Objects/', '/objects/'),
+        norm.replace('/objects/', '/Objects/'),
+        norm.replace('/Benchmark/data/objects/', '/dataset/object_1024_npy/'),
+        norm.replace('/Benchmark/data/Objects/', '/dataset/object_1024_npy/'),
+        norm.replace('/Benchmark/data/object_1024_npy/', '/dataset/object_1024_npy/'),
+        os.path.join('/data/HTC/Data/dataset/object_1024_npy', basename),
+    ]
+    for cand in candidates:
+        if os.path.exists(cand):
+            return cand
+    return path
+
+
 # -------------------------
 # Tools (reuse detections)
 # -------------------------
@@ -594,8 +618,126 @@ class Agent3D:
         chosen = min(options, key=lambda x: abs(x - anchor))
         return (str(chosen), True, chosen, options)
 
+    @staticmethod
+    def _extract_classification_options(query: str) -> List[Tuple[str, str]]:
+        if not isinstance(query, str) or not query.strip():
+            return []
+        text = query
+        pairs = []
+        for m in re.finditer(r"\(([A-Fa-f])\)\s*([^\(\)\n]+)", text):
+            label = m.group(1).upper()
+            value = m.group(2).strip().strip(".,;:!? ")
+            if value:
+                pairs.append((label, value))
+        uniq = []
+        seen = set()
+        for p in pairs:
+            if p[0] in seen:
+                continue
+            seen.add(p[0])
+            uniq.append(p)
+        return uniq
+
+    def _format_detection_result(self, det_topk: List[Dict[str, Any]]) -> str:
+        parts = []
+        for i, o in enumerate(det_topk[:self.args.max_obj]):
+            name = (o.get("name", "") or o.get("label", "") or "unknown").lower()
+            parts.append(f"(obj{i}):{name}!")
+        return " ".join(parts) if parts else "unknown"
+
+    def _validate_detection_finish(self, text: str, det_topk: List[Dict[str, Any]]) -> Tuple[bool, Dict[str, Any]]:
+        raw = (text or "").strip()
+        if not raw:
+            return False, {"reason": "empty_text"}
+
+        matches = re.findall(r"\(obj\s*(\d+)\)\s*:\s*([A-Za-z0-9_]+)\s*!?", raw)
+        if not matches:
+            return False, {"reason": "pattern_not_found"}
+
+        max_k = min(len(det_topk), int(self.args.max_obj))
+        parsed_indices = []
+        parsed_names = {}
+        for idx_s, name in matches:
+            idx = int(idx_s)
+            nm = self._norm(name)
+            parsed_indices.append(idx)
+            parsed_names[idx] = nm
+
+        if any(i < 0 or i >= max_k for i in parsed_indices):
+            return False, {"reason": "index_out_of_range", "max_k": max_k}
+
+        if len(set(parsed_indices)) != len(parsed_indices):
+            return False, {"reason": "duplicate_indices"}
+
+        # Training target is deterministic full list obj0..obj{k-1}
+        expected = list(range(max_k))
+        got = sorted(parsed_indices)
+        if got != expected:
+            return False, {"reason": "indices_incomplete_or_extra", "got": got[:10], "expected_k": max_k}
+
+        # Name alignment check
+        for i in expected:
+            gt_name = self._norm(det_topk[i].get("name", "") or det_topk[i].get("label", "") or "")
+            pred_name = parsed_names.get(i, "")
+            if gt_name and pred_name != gt_name:
+                return False, {"reason": "name_mismatch", "idx": i, "pred": pred_name, "gt": gt_name}
+
+        return True, {"reason": "ok", "count": len(matches)}
+
+    def _fallback_classification_choice(
+        self,
+        query: str,
+        model_text: str,
+        det_topk: List[Dict[str, Any]],
+        pcl_paths=None,
+    ) -> Tuple[str, bool, Dict[str, Any]]:
+        options = self._extract_classification_options(query)
+        if not options:
+            text = (model_text or "").strip()
+            return (text if text else "unknown", False, {"options": []})
+
+        raw = (model_text or "").strip()
+        raw_norm = self._norm(raw)
+
+        # 1) Match label like (A)
+        m = re.search(r"\(([A-Fa-f])\)", raw)
+        if m:
+            lb = m.group(1).upper()
+            for l, v in options:
+                if l == lb:
+                    return (f"({l}) {v}", False, {"options": options, "chosen": l})
+
+        # 2) Match option text in model output
+        for l, v in options:
+            if self._norm(v) and self._norm(v) in raw_norm:
+                return (f"({l}) {v}", False, {"options": options, "chosen": l})
+
+        # 3) Prefer pcl filename class hint for object-classification samples
+        pcl_hint = ""
+        if isinstance(pcl_paths, list) and pcl_paths:
+            base = os.path.basename(str(pcl_paths[0]))
+            m = re.match(r"^\d+_([A-Za-z]+)\d*\.npy$", base)
+            if m:
+                pcl_hint = self._norm(m.group(1))
+        if pcl_hint:
+            for l, v in options:
+                vn = self._norm(v)
+                if vn == pcl_hint or pcl_hint in vn or vn in pcl_hint:
+                    return (f"({l}) {v}", True, {"options": options, "chosen": l, "reason": "pcl_name_match"})
+
+        # 4) Fallback to detector top-1 class if it appears in options
+        if det_topk:
+            top_name = self._norm(det_topk[0].get("name", "") or det_topk[0].get("label", "") or "")
+            for l, v in options:
+                if top_name and (top_name == self._norm(v) or top_name in self._norm(v) or self._norm(v) in top_name):
+                    return (f"({l}) {v}", True, {"options": options, "chosen": l, "reason": "top1_detect_match"})
+
+        # 5) Final fallback: choose first option deterministically
+        l, v = options[0]
+        return (f"({l}) {v}", True, {"options": options, "chosen": l, "reason": "first_option"})
+
     # ----------- Stage 1: intent/plan (text is OK, but still using same MLLM core) -----------
-    def mllm_intent(self, query: str, pcl_paths, obj_list) -> Dict[str, Any]:
+    def mllm_intent(self, query: str, pcl_paths, obj_list, task_type: str) -> Dict[str, Any]:
         """
         输出 tool_plan（1/2步）+ focus（target/A/B/room_type/keywords）
         """
@@ -624,11 +766,19 @@ class Agent3D:
 
         print("intent",raw)
 
-        js = self._extract_json_by_stage(raw, stage="intent")
+        js = self._extract_json_by_stage(raw, stage="intent", task_type=task_type)
 
         # Sanitize and enforce plan
         focus = js.get("focus", {}) if isinstance(js, dict) else {}
-        task_guess = js.get("task", "RoomDetection") if isinstance(js, dict) else "RoomDetection"
+        task_guess = js.get("task", task_type) if isinstance(js, dict) else task_type
+
+        default_plan = [{"tool": "DETECT"}, {"tool": "FINISH"}]
+        if task_type == "Classification":
+            default_plan = [{"tool": "FINISH"}]
+        elif task_type == "Counting":
+            default_plan = [{"tool": "DETECT"}, {"tool": "COUNT"}, {"tool": "FINISH"}]
+        elif task_type == "PositionRelation":
+            default_plan = [{"tool": "DETECT"}, {"tool": "REL_DIR"}, {"tool": "FINISH"}]
 
         out = {
             "stage": "intent",
@@ -641,10 +791,7 @@ class Agent3D:
                 "room_type": focus.get("room_type", ""),
                 "focus_keywords": [],
             },
-            "tool_plan": [
-                {"tool": "DETECT"},
-                {"tool": "FINISH"},
-            ],
+            "tool_plan": default_plan,
             "raw": raw,
             "parse_error": not js,
         }
@@ -660,6 +807,17 @@ class Agent3D:
         - need_tool2（Count 必须 true；Room/VG/REL 默认 false）
         - selected_object_indices（VG:1个；REL:2个；Count:任意个）
         """
+        if task_type == "Classification":
+            return {
+                "stage": "review",
+                "summary": "Classification keeps 3-stage format; review is schema placeholder.",
+                "need_tool2": False,
+                "selected_object_indices": list(range(min(len(det_topk), int(self.args.max_obj)))),
+                "raw": '{"stage":"review","summary":"classification_placeholder"}',
+                "parse_error": False,
+                "next_tool": {"tool": "FINISH"},
+            }
+
         # Format detected objects similar to training data.
         obj_lines = []
         for i, o in enumerate(det_topk[:self.args.max_obj]):
@@ -869,6 +1027,13 @@ class Agent3D:
             query = query.strip()
         pcl_paths = data_item['pcl']
 
+        # Classification has no external detector proposals in many datasets.
+        # Build pseudo proposals from options so the 3-stage pipeline can still run.
+        if task_type == "Classification" and not obj_list:
+            opts = self._extract_classification_options(query)
+            pseudo_name = str(opts[0][1]) if opts else "object"
+            obj_list = [{"name": pseudo_name, "BoundingBox": [0.0, 0.0, 0.0, 1.0, 1.0, 1.0]}]
+
         # Ablation: w/o tool => direct answer (baseline)
         if self.args.wo_tool:
             direct = mllm_generate_one(
@@ -890,7 +1055,7 @@ class Agent3D:
         #     query = "Locate the locations of every room within the scene."
 
         # Step1: intent (plan tool calls)
-        intent = self.mllm_intent(query, pcl_paths, obj_list=obj_list[:self.args.max_obj])
+        intent = self.mllm_intent(query, pcl_paths, obj_list=obj_list[:self.args.max_obj], task_type=task_type)
 
         # task_inferred = intent.get("task", task_type) or task_type
         task_inferred = task_type
@@ -909,7 +1074,7 @@ class Agent3D:
         # Strategy:
         # - Counting/Room: prioritize RECALL (filter by keyword).
         # - VG/Relation: prioritize CONTEXT/ORDER (natural top-k), BUT we should still try to include the relevant objects if possible
-        if task_inferred in ["Counting", "RoomDetection", "PositionRelation", "VisualGrounding_plus"]:
+        if task_inferred in ["Counting", "RoomDetection", "PositionRelation", "VisualGrounding_plus", "Detection", "Classification"]:
             keywords = []
             focus = intent.get("focus", {})
             if focus.get("target"):
@@ -973,6 +1138,12 @@ class Agent3D:
                 else:
                     det_topk = all_objs[:int(self.args.max_obj)]
             
+            elif task_inferred == "Detection":
+                det_topk = all_objs[:int(self.args.max_obj)]
+
+            elif task_inferred == "Classification":
+                det_topk = all_objs[:int(self.args.max_obj)] if all_objs else []
+
             else:
                 det_topk = all_objs[:int(self.args.max_obj)]
         else:
@@ -982,8 +1153,24 @@ class Agent3D:
             # hard fallback
             print(f"[过程数据] 阶段: Detect, 触发兜底: 无候选物体")
             if task_type == "Counting":
-                return "1", intent
-            return "unknown", intent
+                metrics["fallback_used"] = True
+                metrics["fallback_reason"] = "empty_detect_counting"
+                return "1", intent, metrics
+            if task_type == "Detection":
+                metrics["fallback_used"] = True
+                metrics["fallback_reason"] = "empty_detect_detection"
+                metrics["output_failed"] = True
+                return "unknown", intent, metrics
+            if task_type == "Classification":
+                cls_text, cls_used_fb, cls_meta = self._fallback_classification_choice(query, "", det_topk, pcl_paths=pcl_paths)
+                metrics["fallback_used"] = cls_used_fb
+                metrics["fallback_reason"] = "empty_detect_classification"
+                metrics["classification_fallback"] = cls_meta
+                if cls_text in ["unknown", "None", "", None]:
+                    metrics["output_failed"] = True
+                return cls_text, intent, metrics
+            metrics["output_failed"] = True
+            return "unknown", intent, metrics
 
 
 
@@ -1159,6 +1346,27 @@ class Agent3D:
                 tool_res_str = rel_ans
                 final_text = self.mllm_finish(task_inferred, query, tool_res_str, pcl_paths, det_topk, intent=intent, review=review)
                 text = final_text
+
+        elif task_inferred == "Detection":
+            tool_res_str = "Tool=FINISH\n(ready)"
+            final_text = self.mllm_finish(task_inferred, query, tool_res_str, pcl_paths, det_topk, intent=intent, review=review)
+            text = final_text
+            finish_valid, det_meta = self._validate_detection_finish(text, det_topk)
+            metrics["detection_finish_check"] = det_meta
+            if not finish_valid:
+                text = self._format_detection_result(det_topk)
+                metrics["fallback_used"] = True
+                metrics["fallback_reason"] = "detection_finish_miss_direct_detect"
+
+        elif task_inferred == "Classification":
+            tool_res_str = "Tool=FINISH\n(ready)"
+            final_text = self.mllm_finish(task_inferred, query, tool_res_str, pcl_paths, det_topk, intent=intent, review=review)
+            cls_text, cls_used_fb, cls_meta = self._fallback_classification_choice(query, final_text, det_topk, pcl_paths=pcl_paths)
+            text = cls_text
+            if cls_used_fb:
+                metrics["fallback_used"] = True
+                metrics["fallback_reason"] = "classification_finish_miss_direct_choice"
+            metrics["classification_fallback"] = cls_meta
         
         # Reflection: one-shot validation + fallback
         text_fixed, trace = self.reflection_fix(task_inferred, intent, det_topk, selected, text)
@@ -1166,7 +1374,7 @@ class Agent3D:
             metrics["fallback_used"] = True
             print(f"[过程数据] 阶段: Reflection, 触发兜底修复, 原始输出: {text}")
         else:
-            metrics["fallback_used"] = False
+            metrics["fallback_used"] = metrics.get("fallback_used", False)
         if text_fixed in ["unknown", "None", "", None]:
             metrics["output_failed"] = True
         return text_fixed, intent, metrics
@@ -1224,18 +1432,29 @@ class Agent3D:
         )
 
         # 4. Concatenate History
-        # Format:
-        # <Pcl> [IntentUser] \n### gpt:[IntentOut] \n###human: [ReviewUser] \n### gpt:[ReviewOut] \n###human: [FinishUser] \n### gpt:
-        if intent_prompt_str and intent_output_str and review_output_str:
-            prompt = (
-                f"{intent_prompt_str.rstrip()}\n\n" 
-                f"\n### gpt:{intent_output_str}\n###"
-                f"human: {review_context_user.rstrip()}\n"
-                f"\n### gpt:{review_output_str}\n###"
-                f"human: {finish_context_user.rstrip()}\n"
-            )
+        # Classification training is 2-stage only: intent -> finish (no review turn).
+        if task_type == "Classification":
+            if intent_prompt_str and intent_output_str:
+                prompt = (
+                    f"{intent_prompt_str.rstrip()}\n\n"
+                    f"\n### gpt:{intent_output_str}\n###"
+                    f"human: {finish_context_user.rstrip()}\n"
+                )
+            else:
+                prompt = finish_context_user
         else:
-            prompt = finish_context_user
+            # Format:
+            # <Pcl> [IntentUser] \n### gpt:[IntentOut] \n###human: [ReviewUser] \n### gpt:[ReviewOut] \n###human: [FinishUser] \n### gpt:
+            if intent_prompt_str and intent_output_str and review_output_str:
+                prompt = (
+                    f"{intent_prompt_str.rstrip()}\n\n" 
+                    f"\n### gpt:{intent_output_str}\n###"
+                    f"human: {review_context_user.rstrip()}\n"
+                    f"\n### gpt:{review_output_str}\n###"
+                    f"human: {finish_context_user.rstrip()}\n"
+                )
+            else:
+                prompt = finish_context_user
 
         if getattr(self.args, "debug_prompts", False):
             print("[DEBUG][FINISH_PROMPT]\n" + prompt)
@@ -1264,8 +1483,8 @@ class Agent3D:
 # -------------------------
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--task_type', type=str, default='Counting',
-                        choices=['VisualGrounding_plus', 'Counting', 'RoomDetection', 'PositionRelation'])
+    parser.add_argument('--task_type', type=str, default='Detection',
+                        choices=['VisualGrounding_plus', 'Counting', 'RoomDetection', 'PositionRelation', 'Detection', 'Classification'])
     parser.add_argument('--base-data-path', type=str, default='/data/HTC/Data/dataset/Benchmark/data')
     # Default to repo-local answers/ to avoid writing outside workspace (cwd-dependent).
     parser.add_argument('--answers-dir', type=str, default='/data/HTC/Project/llm/answers')
@@ -1276,10 +1495,10 @@ def parse_args():
     parser.add_argument('--encoder_ckpt_path', type=str,
                         default='/data/HTC/Data/model_zoo/epcl_ckpt/epcl_scannet_vit-L-14_256tokens_latest.pth')
     parser.add_argument('--vicuna_ckpt_path', type=str, default='/data/HTC/Data/model_zoo/vicuna-7b/Vicuna_7B_v0')
-    # parser.add_argument('--delta_ckpt_path', type=str, default='/data/HTC/Data/model_zoo/llm_exe/agent_v2_pos/pytorch_model.pt')  #实验版本
+
     # parser.add_argument('--delta_ckpt_path', type=str, default='/data/HTC/Data/model_zoo/llm_exe/agent/pytorch_model.pt')   #实验版本
     # parser.add_argument('--delta_ckpt_path', type=str, default='/data/HTC/Data/model_zoo/llm_exe/agent_v3/pytorch_model.pt')  #完整agent版本
-    parser.add_argument('--delta_ckpt_path', type=str, default='/data/HTC/Data/model_zoo/llm_exe/agent/pytorch_model.pt')  #完整agent版本
+    parser.add_argument('--delta_ckpt_path', type=str, default="/data/HTC/Data/model_zoo/llm_exe/agent/pytorch_model.pt")   #大论文版本
 
     parser.add_argument('--train_stage', type=int, default=2)
     parser.add_argument('--stage', type=int, default=2)
@@ -1369,10 +1588,19 @@ def main():
         
         features = []
         if "pcl_paths" in inputs and inputs["pcl_paths"]:
+            resolved_pcl_paths = [_resolve_pcl_path(p) for p in inputs["pcl_paths"]]
+            # for old_p, new_p in zip(inputs["pcl_paths"], resolved_pcl_paths):
+            #     if old_p != new_p:
+            #         print(f"[PathFix] pcl path remapped: {old_p} -> {new_p}")
+
+            safe_obj_list = inputs.get("obj_list", []) or []
+            if not safe_obj_list:
+                safe_obj_list = [{"name": "object", "BoundingBox": [0.0, 0.0, 0.0, 1.0, 1.0, 1.0]}]
+
             # Note: We use self.test_encode_pcl which is available on the model instance
             pcl_embeds, _ = self.test_encode_pcl(
-                inputs["pcl_paths"], 
-                inputs["obj_list"][:20], 
+                resolved_pcl_paths,
+                safe_obj_list[:20], 
                 inputs['list_of_objpoints']
             )
             # FIX: Unwrap batch dimension so that feature_embeds is [N_obj, Dim]
@@ -1536,7 +1764,10 @@ def main():
                 break
 
             pcl_paths = data_item['pcl']
-            obj_list = det_tool.proposals_for_scene(pcl_paths[0], idx)
+            if args.task_type == 'Classification':
+                obj_list = []
+            else:
+                obj_list = det_tool.proposals_for_scene(pcl_paths[0], idx)
 
             start = time.time() 
             text, intent_res, metrics = agent.solve(args.task_type, data_item, obj_list)
