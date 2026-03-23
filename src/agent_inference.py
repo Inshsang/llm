@@ -650,39 +650,102 @@ class Agent3D:
         if not raw:
             return False, {"reason": "empty_text"}
 
-        matches = re.findall(r"\(obj\s*(\d+)\)\s*:\s*([A-Za-z0-9_]+)\s*!?", raw)
-        if not matches:
+        max_k = min(len(det_topk), int(self.args.max_obj))
+        if max_k <= 0:
+            return False, {"reason": "no_expected_objects"}
+
+        token_pattern = r"\(obj\s*(\d+)\)\s*:\s*([A-Za-z0-9_\- ]+)\s*!"
+        token_matches = list(re.finditer(token_pattern, raw))
+        if not token_matches:
             return False, {"reason": "pattern_not_found"}
 
-        max_k = min(len(det_topk), int(self.args.max_obj))
         parsed_indices = []
         parsed_names = {}
-        for idx_s, name in matches:
-            idx = int(idx_s)
-            nm = self._norm(name)
+        for m in token_matches:
+            idx = int(m.group(1))
+            nm = self._norm(m.group(2))
             parsed_indices.append(idx)
             parsed_names[idx] = nm
 
-        if any(i < 0 or i >= max_k for i in parsed_indices):
+        in_range = [i for i in parsed_indices if 0 <= i < max_k]
+        if not in_range:
             return False, {"reason": "index_out_of_range", "max_k": max_k}
 
-        if len(set(parsed_indices)) != len(parsed_indices):
-            return False, {"reason": "duplicate_indices"}
+        uniq = sorted(set(in_range))
+        coverage = len(uniq) / max(1, max_k)
 
-        # Training target is deterministic full list obj0..obj{k-1}
-        expected = list(range(max_k))
-        got = sorted(parsed_indices)
-        if got != expected:
-            return False, {"reason": "indices_incomplete_or_extra", "got": got[:10], "expected_k": max_k}
-
-        # Name alignment check
-        for i in expected:
+        # Soft name check: exact/contain match both accepted.
+        name_match = 0
+        for i in uniq:
             gt_name = self._norm(det_topk[i].get("name", "") or det_topk[i].get("label", "") or "")
             pred_name = parsed_names.get(i, "")
-            if gt_name and pred_name != gt_name:
-                return False, {"reason": "name_mismatch", "idx": i, "pred": pred_name, "gt": gt_name}
+            if not gt_name:
+                continue
+            if pred_name == gt_name or pred_name in gt_name or gt_name in pred_name:
+                name_match += 1
 
-        return True, {"reason": "ok", "count": len(matches)}
+        # Relaxed acceptance to avoid over-strict false fallbacks:
+        # - at least 40% unique-index coverage, OR
+        # - >=3 unique valid objects parsed.
+        # Name mismatch alone won't fail validation.
+        if coverage >= 0.4 or len(uniq) >= 3:
+            return True, {
+                "reason": "ok_relaxed",
+                "count": len(token_matches),
+                "valid_unique": len(uniq),
+                "coverage": round(coverage, 4),
+                "name_match": name_match,
+            }
+
+        return False, {
+            "reason": "coverage_too_low",
+            "count": len(token_matches),
+            "valid_unique": len(uniq),
+            "coverage": round(coverage, 4),
+            "max_k": max_k,
+        }
+
+    def _validate_room_detection_finish(self, text: str) -> Tuple[bool, Dict[str, Any]]:
+        raw = (text or "").strip()
+        if not raw:
+            return False, {"reason": "empty_text", "num_boxes": 0}
+        boxes = self._extract_room_boxes_from_text(raw)
+        if not boxes:
+            return False, {"reason": "no_valid_room_box", "num_boxes": 0}
+        return True, {"reason": "ok", "num_boxes": len(boxes)}
+
+    @staticmethod
+    def _extract_room_boxes_from_text(text: str) -> List[List[float]]:
+        if not isinstance(text, str):
+            return []
+        nums = [float(x) for x in re.findall(r"-?\d+\.?\d*", text)]
+        nums = nums[: (len(nums) // 6) * 6]
+        out = []
+        for i in range(0, len(nums), 6):
+            b = nums[i:i + 6]
+            if len(b) == 6:
+                out.append([float(v) for v in b])
+        return out
+
+    def _fallback_room_detection_result(self, det_topk: List[Dict[str, Any]]) -> str:
+        candidates: List[List[float]] = []
+        seen = set()
+        for o in det_topk[: max(1, int(self.args.max_obj))]:
+            bb = o.get("BoundingBox", None)
+            if isinstance(bb, list) and len(bb) == 6:
+                key = tuple(round(float(v), 3) for v in bb)
+                if key in seen:
+                    continue
+                seen.add(key)
+                candidates.append([round(float(v), 3) for v in bb])
+
+        if not candidates:
+            return "unknown"
+
+        # Keep a compact set to avoid overly long outputs while preserving coverage.
+        k = min(8, len(candidates))
+        lines = [f"room{i+1} {candidates[i]}" for i in range(k)]
+        return "\n".join(lines)
 
     def _fallback_classification_choice(
         self,
@@ -1236,6 +1299,14 @@ class Agent3D:
             tool_res_str = "Tool=FINISH\n(ready)"
             final_text = self.mllm_finish(task_inferred, query, tool_res_str, pcl_paths, det_topk, intent=intent, review=review)
             text = final_text
+            room_valid, room_meta = self._validate_room_detection_finish(text)
+            metrics["room_finish_check"] = room_meta
+            if not room_valid:
+                text = self._fallback_room_detection_result(det_topk)
+                metrics["fallback_used"] = True
+                metrics["fallback_reason"] = "room_finish_parse_error_direct_detect"
+                if text in ["unknown", "None", "", None]:
+                    metrics["output_failed"] = True
 
         elif task_inferred == "PositionRelation":
             focus = intent.get("focus", {}) if isinstance(intent, dict) else {}
@@ -1264,6 +1335,11 @@ class Agent3D:
             # Prefer matching from det_topk (smaller), fall back to all_objs.
             # Using det_topk keeps response aligned with the agent's "DETECT topk" idea.
             search_space = det_topk if det_topk else all_objs
+
+            if metrics.get("num_selected_instances", 0) == 0:
+                metrics["fallback_used"] = True
+                metrics["fallback_reason"] = "positionrelation_zero_selected"
+                print("[过程数据] 阶段: PositionRelation, 触发兜底: num_selected_instances=0")
 
             a_hits = _find_matches(search_space, focus_a)
             b_hits = _find_matches(search_space, focus_b)
