@@ -716,12 +716,17 @@ class Agent3D:
             "max_k": max_k,
         }
 
-        if coverage >= 0.4 or len(uniq) >= 3:
-            meta.update({"reason": "ok_relaxed", "parse_error": False, "fallback_needed": False})
+        # Detection finish should faithfully restate the detector proposals.
+        # Any missing object or name mismatch should fall back to direct DETECT output.
+        if len(uniq) == max_k and name_match >= len(uniq):
+            meta.update({"reason": "ok_exact", "parse_error": False, "fallback_needed": False})
             return True, meta
 
-        meta.update({"reason": "ok_partial", "parse_error": True, "fallback_needed": False})
-        return True, meta
+        reason = "insufficient_coverage"
+        if len(uniq) == max_k and name_match < len(uniq):
+            reason = "name_mismatch"
+        meta.update({"reason": reason, "parse_error": True, "fallback_needed": True})
+        return False, meta
 
     def _validate_room_detection_finish(self, text: str) -> Tuple[bool, Dict[str, Any]]:
         raw = (text or "").strip()
@@ -913,6 +918,49 @@ class Agent3D:
         l, v = options[0]
         return (f"({l}) {v}", True, {"options": options, "chosen": l, "reason": "first_option"})
 
+    def _validate_classification_finish(self, query: str, text: str) -> Tuple[bool, Dict[str, Any]]:
+        raw = (text or "").strip()
+        options = self._extract_classification_options(query)
+        if not options:
+            return True, {"reason": "no_options", "parse_error": False, "fallback_needed": False}
+        if not raw:
+            return False, {"reason": "empty_text", "parse_error": True, "fallback_needed": True}
+
+        m = re.search(r"\(([A-Fa-f])\)", raw)
+        if m:
+            lb = m.group(1).upper()
+            for l, v in options:
+                if l == lb:
+                    return True, {
+                        "reason": "label_match",
+                        "parse_error": False,
+                        "fallback_needed": False,
+                        "chosen": l,
+                    }
+            return False, {
+                "reason": "invalid_label",
+                "parse_error": True,
+                "fallback_needed": True,
+                "label": lb,
+            }
+
+        raw_norm = self._norm(raw)
+        for l, v in options:
+            vn = self._norm(v)
+            if vn and vn in raw_norm:
+                return True, {
+                    "reason": "option_text_match",
+                    "parse_error": False,
+                    "fallback_needed": False,
+                    "chosen": l,
+                }
+
+        return False, {
+            "reason": "pattern_not_found",
+            "parse_error": True,
+            "fallback_needed": True,
+        }
+
     # ----------- Stage 1: intent/plan (text is OK, but still using same MLLM core) -----------
     def mllm_intent(self, query: str, pcl_paths, obj_list, task_type: str) -> Dict[str, Any]:
         """
@@ -954,6 +1002,8 @@ class Agent3D:
             default_plan = [{"tool": "DETECT"}, {"tool": "COUNT"}, {"tool": "FINISH"}]
         elif task_type == "PositionRelation":
             default_plan = [{"tool": "DETECT"}, {"tool": "REL_DIR"}, {"tool": "FINISH"}]
+        elif task_type == "Classification":
+            default_plan = [{"tool": "FINISH"}]
 
         out = {
             "stage": "intent",
@@ -1360,16 +1410,21 @@ class Agent3D:
 
 
 
-        # Step2: review/select (MULTIMODAL MLLM)
-        review = self.mllm_review_multimodal(task_inferred, query, pcl_paths, det_topk, intent)
+        review = None
+        selected = []
+        if task_inferred != "Classification":
+            # Step2: review/select (MULTIMODAL MLLM)
+            review = self.mllm_review_multimodal(task_inferred, query, pcl_paths, det_topk, intent)
 
-        selected = review.get("selected_object_indices", [])
-        metrics["num_selected_instances"] = len(selected)
-        metrics["parse_error"] = metrics.get("parse_error", False) or review.get("parse_error", False)
-        
-        print(f"[过程数据] 实例选择: {selected}")
-        if review.get("parse_error"):
-            print(f"[过程数据] 阶段: Review, 解析失败, 当前输出: {review.get('raw', '')}")
+            selected = review.get("selected_object_indices", [])
+            metrics["num_selected_instances"] = len(selected)
+            metrics["parse_error"] = metrics.get("parse_error", False) or review.get("parse_error", False)
+
+            print(f"[过程数据] 实例选择: {selected}")
+            if review.get("parse_error"):
+                print(f"[过程数据] 阶段: Review, 解析失败, 当前输出: {review.get('raw', '')}")
+        else:
+            metrics["num_selected_instances"] = 0
 
         # Tool2 decision (fixed budget)
         text = "unknown"
@@ -1578,8 +1633,13 @@ class Agent3D:
         elif task_inferred == "Classification":
             tool_res_str = "Tool=FINISH\n(ready)"
             final_text = self.mllm_finish(task_inferred, query, tool_res_str, pcl_paths, det_topk, intent=intent, review=review)
+            finish_valid, cls_finish_meta = self._validate_classification_finish(query, final_text)
+            metrics["classification_finish_check"] = cls_finish_meta
+            metrics["parse_error"] = metrics.get("parse_error", False) or bool(cls_finish_meta.get("parse_error", False))
             cls_text, cls_used_fb, cls_meta = self._fallback_classification_choice(query, final_text, det_topk, pcl_paths=pcl_paths)
             text = cls_text
+            if not finish_valid:
+                print(f"[过程数据] 阶段: Finish, Classification 解析失败, 当前输出: {final_text}")
             if cls_used_fb:
                 metrics["fallback_used"] = True
                 metrics["fallback_reason"] = "classification_finish_miss_direct_choice"
@@ -1657,6 +1717,12 @@ class Agent3D:
                 f"\n### gpt:{intent_output_str}\n###"
                 f"human: {review_context_user.rstrip()}\n"
                 f"\n### gpt:{review_output_str}\n###"
+                f"human: {finish_context_user.rstrip()}\n"
+            )
+        elif intent_prompt_str and intent_output_str:
+            prompt = (
+                f"{intent_prompt_str.rstrip()}\n\n"
+                f"\n### gpt:{intent_output_str}\n###"
                 f"human: {finish_context_user.rstrip()}\n"
             )
         else:
