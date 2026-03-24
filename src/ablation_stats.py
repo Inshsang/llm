@@ -858,15 +858,7 @@ def save_plot(rows: List[Dict[str, Any]], out_plot: str) -> Optional[str]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="统计六个任务的四组消融结果")
-<<<<<<< HEAD
-<<<<<<< HEAD
-    parser.add_argument("--agent-dir", default="/data/HTC/Project/llm/answers")
-=======
     parser.add_argument("--agent-dir", default="/data/HTC/Project/llm/answers/v2")
->>>>>>> parent of 54998f4 (初步完善回撤)
-=======
-    parser.add_argument("--agent-dir", default="/data/HTC/Project/llm/answers/v2")
->>>>>>> parent of 54998f4 (初步完善回撤)
     parser.add_argument("--agent-classification", default="/data/HTC/Project/llm/answers/Agent_Classification.jsonl")
     parser.add_argument("--agent-detection", default="/data/HTC/Project/llm/answers/Agent_Detection.jsonl")
 
