@@ -712,11 +712,11 @@ class Agent3D:
     def _validate_detection_finish(self, text: str, det_topk: List[Dict[str, Any]]) -> Tuple[bool, Dict[str, Any]]:
         raw = (text or "").strip()
         if not raw:
-            return False, {"reason": "empty_text"}
+            return False, {"reason": "empty_text", "parse_error": True, "semantic_mismatch": False, "fallback_needed": True}
 
         matches = re.findall(r"\(obj\s*(\d+)\)\s*:\s*([A-Za-z0-9_]+)\s*!?", raw)
         if not matches:
-            return False, {"reason": "pattern_not_found"}
+            return False, {"reason": "pattern_not_found", "parse_error": True, "semantic_mismatch": False, "fallback_needed": True}
 
         max_k = min(len(det_topk), int(self.args.max_obj))
         parsed_indices = []
@@ -728,39 +728,61 @@ class Agent3D:
             parsed_names[idx] = nm
 
         if any(i < 0 or i >= max_k for i in parsed_indices):
-            return False, {"reason": "index_out_of_range", "max_k": max_k}
+            return False, {"reason": "index_out_of_range", "max_k": max_k, "parse_error": True, "semantic_mismatch": False, "fallback_needed": True}
 
         if len(set(parsed_indices)) != len(parsed_indices):
-            return False, {"reason": "duplicate_indices"}
+            return False, {"reason": "duplicate_indices", "parse_error": True, "semantic_mismatch": False, "fallback_needed": True}
 
         # Training target is deterministic full list obj0..obj{k-1}
         expected = list(range(max_k))
         got = sorted(parsed_indices)
         if got != expected:
-            return False, {"reason": "indices_incomplete_or_extra", "got": got[:10], "expected_k": max_k}
+            return False, {"reason": "indices_incomplete_or_extra", "got": got[:10], "expected_k": max_k, "parse_error": True, "semantic_mismatch": False, "fallback_needed": True}
 
-        # Name alignment check
+        # Keep parser readability separate from semantic label alignment.
+        name_match = 0
         for i in expected:
             gt_name = self._norm(det_topk[i].get("name", "") or det_topk[i].get("label", "") or "")
             pred_name = parsed_names.get(i, "")
-            if gt_name and pred_name != gt_name:
-                return False, {"reason": "name_mismatch", "idx": i, "pred": pred_name, "gt": gt_name}
+            if gt_name and pred_name == gt_name:
+                name_match += 1
+                continue
+            if gt_name:
+                return False, {
+                    "reason": "name_mismatch",
+                    "idx": i,
+                    "pred": pred_name,
+                    "gt": gt_name,
+                    "count": len(matches),
+                    "valid_unique": len(set(parsed_indices)),
+                    "coverage": len(set(parsed_indices)) / max_k if max_k else 0.0,
+                    "name_match": name_match,
+                    "max_k": max_k,
+                    "parse_error": False,
+                    "semantic_mismatch": True,
+                    "fallback_needed": True,
+                }
 
-        return True, {"reason": "ok", "count": len(matches)}
+        return True, {
+            "reason": "ok_exact",
+            "count": len(matches),
+            "valid_unique": len(set(parsed_indices)),
+            "coverage": len(set(parsed_indices)) / max_k if max_k else 0.0,
+            "name_match": name_match,
+            "max_k": max_k,
+            "parse_error": False,
+            "semantic_mismatch": False,
+            "fallback_needed": False,
+        }
 
-    def _fallback_classification_choice(
-        self,
-        query: str,
-        model_text: str,
-        det_topk: List[Dict[str, Any]],
-        pcl_paths=None,
-    ) -> Tuple[str, bool, Dict[str, Any]]:
+    def _match_classification_choice(self, query: str, model_text: str) -> Tuple[Optional[str], Dict[str, Any]]:
         options = self._extract_classification_options(query)
-        if not options:
-            text = (model_text or "").strip()
-            return (text if text else "unknown", False, {"options": []})
-
         raw = (model_text or "").strip()
+        if not options:
+            return None, {"options": [], "reason": "no_options", "raw": raw}
+        if not raw:
+            return None, {"options": options, "reason": "empty_text", "raw": raw}
+
         raw_norm = self._norm(raw)
 
         # 1) Match label like (A)
@@ -769,24 +791,47 @@ class Agent3D:
             lb = m.group(1).upper()
             for l, v in options:
                 if l == lb:
-                    return (f"({l}) {v}", False, {"options": options, "chosen": l})
+                    return f"({l}) {v}", {"options": options, "chosen": l, "reason": "label_match", "raw": raw}
 
         # 2) Match option text in model output
         for l, v in options:
             if self._norm(v) and self._norm(v) in raw_norm:
-                return (f"({l}) {v}", False, {"options": options, "chosen": l})
+                return f"({l}) {v}", {"options": options, "chosen": l, "reason": "text_match", "raw": raw}
 
+        return None, {"options": options, "reason": "not_in_options", "raw": raw}
+
+    def _fallback_classification_choice(
+        self,
+        query: str,
+        model_text: str,
+        det_topk: List[Dict[str, Any]],
+        pcl_paths=None,
+    ) -> Tuple[str, bool, Dict[str, Any]]:
+        matched_text, meta = self._match_classification_choice(query, model_text)
+        if matched_text is not None:
+            return matched_text, False, meta
+
+        options = meta.get("options", []) or []
+        if not options:
+            text = (model_text or "").strip()
+            out = dict(meta)
+            out.setdefault("reason", "no_options")
+            return (text if text else "unknown", False, out)
 
         # 3) Fallback to detector top-1 class if it appears in options
         if det_topk:
             top_name = self._norm(det_topk[0].get("name", "") or det_topk[0].get("label", "") or "")
             for l, v in options:
                 if top_name and (top_name == self._norm(v) or top_name in self._norm(v) or self._norm(v) in top_name):
-                    return (f"({l}) {v}", True, {"options": options, "chosen": l, "reason": "top1_detect_match"})
+                    out = dict(meta)
+                    out.update({"chosen": l, "fallback_reason": "top1_detect_match"})
+                    return (f"({l}) {v}", True, out)
 
         # 4) Final fallback: choose first option deterministically
         l, v = options[0]
-        return (f"({l}) {v}", True, {"options": options, "chosen": l, "reason": "first_option"})
+        out = dict(meta)
+        out.update({"chosen": l, "fallback_reason": "first_option"})
+        return (f"({l}) {v}", True, out)
 
     # ----------- Stage 1: intent/plan (text is OK, but still using same MLLM core) -----------
     def mllm_intent(self, query: str, pcl_paths, obj_list, task_type: str) -> Dict[str, Any]:
@@ -825,7 +870,9 @@ class Agent3D:
         task_guess = js.get("task", task_type) if isinstance(js, dict) else task_type
 
         default_plan = [{"tool": "DETECT"}, {"tool": "FINISH"}]
-        if task_type == "Counting":
+        if task_type == "Classification":
+            default_plan = [{"tool": "FINISH"}]
+        elif task_type == "Counting":
             default_plan = [{"tool": "DETECT"}, {"tool": "COUNT"}, {"tool": "FINISH"}]
         elif task_type == "PositionRelation":
             default_plan = [{"tool": "DETECT"}, {"tool": "REL_DIR"}, {"tool": "FINISH"}]
@@ -1084,7 +1131,7 @@ class Agent3D:
         pcl_paths = data_item['pcl']
 
         # Classification has no external detector proposals in many datasets.
-        # Build pseudo proposals from options so the 3-stage pipeline can still run.
+        # Build pseudo proposals from options so fallback logic can still map to the option set.
         if task_type == "Classification" and not obj_list:
             opts = self._extract_classification_options(query)
             pseudo = []
@@ -1110,19 +1157,15 @@ class Agent3D:
             )
             text = direct[0] if isinstance(direct, list) and direct else str(direct)
             return text, {}, {}
-        
-        # if task_type == "RoomDetection":
-        #     query = "Locate the locations of every room within the scene."
 
         # Step1: intent (plan tool calls)
         intent = self.mllm_intent(query, pcl_paths, obj_list=obj_list[:self.args.max_obj], task_type=task_type)
 
-        # task_inferred = intent.get("task", task_type) or task_type
         task_inferred = task_type
         metrics["task_inferred"] = task_inferred
         metrics["tool_plan"] = intent.get('tool_plan', [])
         metrics["parse_error"] = intent.get("parse_error", False)
-        
+
         print(f"[过程数据] 任务识别: {task_inferred}")
         print(f"[过程数据] 工具选择: {intent.get('tool_plan', [])}")
         if metrics["parse_error"]:
@@ -1131,27 +1174,22 @@ class Agent3D:
         # Tool1: DETECT (reuse)
         all_objs = obj_list or []
 
-        # Strategy:
-        # - Counting/Room: prioritize RECALL (filter by keyword).
-        # - VG/Relation: prioritize CONTEXT/ORDER (natural top-k), BUT we should still try to include the relevant objects if possible
         if task_inferred in ["Counting", "RoomDetection", "PositionRelation", "VisualGrounding_plus", "Detection", "Classification"]:
             keywords = []
             focus = intent.get("focus", {})
             if focus.get("target"):
                 keywords.append(focus["target"])
             if task_inferred == "PositionRelation":
-                if focus.get("A"): keywords.append(focus["A"])
-                if focus.get("B"): keywords.append(focus["B"])
+                if focus.get("A"):
+                    keywords.append(focus["A"])
+                if focus.get("B"):
+                    keywords.append(focus["B"])
 
             if task_type == "RoomDetection":
                 rt = focus.get("room_type", "")
                 keywords.extend(self.ROOM_HINTS.get(rt, []) or [])
                 keywords.extend(focus.get("focus_keywords", []) or [])
 
-            # Simple keyword matching to find all potential targets
-            # We want to keep the original order mostly, but ensure candidates are present
-            
-            # Helper to check match
             def is_match(obj, kws):
                 name = self._norm(obj.get("name", "") or obj.get("label", "") or "")
                 for k in kws:
@@ -1170,34 +1208,38 @@ class Agent3D:
                 target_kws = []
                 if task_inferred == "Counting":
                     t = intent.get("focus", {}).get("target", "")
-                    if t: target_kws.append(t)
+                    if t:
+                        target_kws.append(t)
                 elif task_inferred == "VisualGrounding_plus":
                     t = intent.get("focus", {}).get("target", "")
-                    if t: target_kws.append(t)
+                    if t:
+                        target_kws.append(t)
                 elif task_inferred == "PositionRelation":
                     tA = intent.get("focus", {}).get("A", "")
                     tB = intent.get("focus", {}).get("B", "")
-                    if tA: target_kws.append(tA)
-                    if tB: target_kws.append(tB)
+                    if tA:
+                        target_kws.append(tA)
+                    if tB:
+                        target_kws.append(tB)
                     if not tA and not tB:
-                         tList = intent.get("focus", {}).get("target", [])
-                         if isinstance(tList, list):
-                             target_kws.extend([str(x) for x in tList])
+                        t_list = intent.get("focus", {}).get("target", [])
+                        if isinstance(t_list, list):
+                            target_kws.extend([str(x) for x in t_list])
 
                 hits = []
                 if target_kws:
                     for i, obj in enumerate(all_objs):
                         if is_match(obj, target_kws):
                             hits.append(i)
-                
+
                 hits = sorted(list(set(hits)))
                 hits = hits[:int(self.args.max_obj)]
-                
+
                 if hits:
                     det_topk = [all_objs[i] for i in hits]
                 else:
                     det_topk = all_objs[:int(self.args.max_obj)]
-            
+
             elif task_inferred == "Detection":
                 det_topk = all_objs[:int(self.args.max_obj)]
 
@@ -1210,7 +1252,6 @@ class Agent3D:
             det_topk = all_objs[:int(self.args.max_obj)]
 
         if not det_topk:
-            # hard fallback
             print(f"[过程数据] 阶段: Detect, 触发兜底: 无候选物体")
             if task_type == "Counting":
                 metrics["fallback_used"] = True
@@ -1223,6 +1264,7 @@ class Agent3D:
                 return "unknown", intent, metrics
             if task_type == "Classification":
                 cls_text, cls_used_fb, cls_meta = self._fallback_classification_choice(query, "", det_topk, pcl_paths=pcl_paths)
+                metrics["parse_error"] = True
                 metrics["fallback_used"] = cls_used_fb
                 metrics["fallback_reason"] = "empty_detect_classification"
                 metrics["classification_fallback"] = cls_meta
@@ -1232,8 +1274,25 @@ class Agent3D:
             metrics["output_failed"] = True
             return "unknown", intent, metrics
 
-
-
+        if task_inferred == "Classification":
+            tool_res_str = "Tool=FINISH\n(ready)"
+            final_text = self.mllm_finish(task_inferred, query, tool_res_str, pcl_paths, det_topk, intent=intent, review=None)
+            matched_text, finish_meta = self._match_classification_choice(query, final_text)
+            metrics["classification_finish_check"] = finish_meta
+            if matched_text is not None:
+                text = matched_text
+                metrics["classification_fallback"] = {**finish_meta, "used_fallback": False}
+            else:
+                metrics["parse_error"] = True
+                cls_text, cls_used_fb, cls_meta = self._fallback_classification_choice(query, final_text, det_topk, pcl_paths=pcl_paths)
+                text = cls_text
+                metrics["classification_fallback"] = {**cls_meta, "used_fallback": cls_used_fb}
+                metrics["fallback_used"] = True
+                metrics["fallback_reason"] = "classification_finish_not_in_options"
+                print(f"[过程数据] 阶段: Classification-Finish, 触发兜底: {cls_meta.get('reason', 'not_in_options')}")
+            if text in ["unknown", "None", "", None]:
+                metrics["output_failed"] = True
+            return text, intent, metrics
 
         # Step2: review/select (MULTIMODAL MLLM)
         review = self.mllm_review_multimodal(task_inferred, query, pcl_paths, det_topk, intent)
@@ -1241,16 +1300,14 @@ class Agent3D:
         selected = review.get("selected_object_indices", [])
         metrics["num_selected_instances"] = len(selected)
         metrics["parse_error"] = metrics.get("parse_error", False) or review.get("parse_error", False)
-        
+
         print(f"[过程数据] 实例选择: {selected}")
         if review.get("parse_error"):
             print(f"[过程数据] 阶段: Review, 解析失败, 当前输出: {review.get('raw', '')}")
 
-        # Tool2 decision (fixed budget)
         text = "unknown"
 
         if task_inferred == "Counting":
-            # count_res = len(selected) if selected else 0
             if selected:
                 count_res = len(selected)
             elif det_topk:
@@ -1260,7 +1317,7 @@ class Agent3D:
 
             tgt = intent.get("focus", {}).get("target", "") or "object"
             tool_res_str = f"Tool=COUNT\nTarget={tgt}\ncount_all={count_res}\nfinal_count={count_res}"
-            
+
             final_text = self.mllm_finish(task_inferred, query, tool_res_str, pcl_paths, det_topk, intent=intent, review=review)
             text, used_count_option_fallback, chosen_option, query_options = self._fallback_counting_to_nearest_option(
                 query=query,
@@ -1277,16 +1334,13 @@ class Agent3D:
                     f"options={query_options}, chosen={chosen_option}"
                 )
 
-
         elif task_inferred == "VisualGrounding_plus":
             if len(selected) != 1:
                 tgt = intent.get("focus", {}).get("target", "")
                 hits = self._find_by_keywords_fallback(det_topk, [tgt] if tgt else [])
                 selected = [hits[0]] if hits else [0]
-            
-            idx = selected[0]
+
             tool_res_str = "Tool=FINISH\n(ready)"
-            
             final_text = self.mllm_finish(task_inferred, query, tool_res_str, pcl_paths, det_topk, intent=intent, review=review)
             text = final_text
 
@@ -1348,14 +1402,10 @@ class Agent3D:
                         hits.append(i)
                 return hits
 
-            # Prefer matching from det_topk (smaller), fall back to all_objs.
-            # Using det_topk keeps response aligned with the agent's "DETECT topk" idea.
             search_space = det_topk if det_topk else all_objs
-
             a_hits = _find_matches(search_space, focus_a)
             b_hits = _find_matches(search_space, focus_b)
 
-            # Fallback if intent missing or no hits.
             fallback_applied = False
             fallback_reason = []
             if not a_hits:
@@ -1366,26 +1416,22 @@ class Agent3D:
                 b_hits = list(range(len(search_space)))
                 fallback_applied = True
                 fallback_reason.append("B_not_found")
-            
+
             if fallback_applied:
                 metrics["fallback_used"] = True
                 metrics["fallback_reason"] = ",".join(fallback_reason)
                 print(f"[过程数据] 阶段: PositionRelation, 触发兜底: {metrics['fallback_reason']}")
-                # If target objects are completely missing, computing a random relation is meaningless.
                 text = "unknown"
                 metrics["output_failed"] = True
             else:
                 a_idx = a_hits[0] if a_hits else 0
                 b_idx = b_hits[0] if b_hits else (1 if len(search_space) > 1 else 0)
-                
-                # If A and B are the same instance/index, try to pick a different B if possible
+
                 if b_idx == a_idx and len(b_hits) > 1:
                     b_idx = b_hits[1]
                 if b_idx == a_idx and len(search_space) > 1:
-                    # Fallback: just pick something else
                     b_idx = 1 if a_idx == 0 else 0
-                
-                # Update selected indices for reflection
+
                 selected = [a_idx, b_idx]
 
                 objA = search_space[a_idx] if 0 <= a_idx < len(search_space) else {}
@@ -1396,16 +1442,14 @@ class Agent3D:
                 nameA = focus_a or _obj_name(objA) or "object"
                 nameB = focus_b or _obj_name(objB) or "object"
 
-                qid, flip = (60, 0)  # default to a stable direction
+                qid, flip = (60, 0)
                 if isinstance(bbA, list) and isinstance(bbB, list) and len(bbA) == 6 and len(bbB) == 6:
                     qid, flip = self.geom.relation_4way(bbA, bbB)
                     if qid == 0:
                         qid, flip = (60, 0)
 
-                # Pick a template if available; otherwise use a simple fallback sentence.
                 tpl = ""
                 if self.pos_rel_templates and qid > 0:
-                    # Prefer exact key, then search forward within the usual +[0..29] range.
                     tpl = self.pos_rel_templates.get(str(qid), "")
                     if not tpl:
                         for off in range(1, 30):
@@ -1431,7 +1475,7 @@ class Agent3D:
                     }
                     rel = rel_map.get(qid, "near")
                     rel_ans = f"The {nameA} is to the {rel} of {nameB}."
-                
+
                 tool_res_str = rel_ans
                 final_text = self.mllm_finish(task_inferred, query, tool_res_str, pcl_paths, det_topk, intent=intent, review=review)
                 text = final_text
@@ -1442,22 +1486,12 @@ class Agent3D:
             text = final_text
             finish_valid, det_meta = self._validate_detection_finish(text, det_topk)
             metrics["detection_finish_check"] = det_meta
+            metrics["parse_error"] = det_meta.get("parse_error", False)
             if not finish_valid:
                 text = self._format_detection_result(det_topk)
                 metrics["fallback_used"] = True
                 metrics["fallback_reason"] = "detection_finish_miss_direct_detect"
 
-        elif task_inferred == "Classification":
-            tool_res_str = "Tool=FINISH\n(ready)"
-            final_text = self.mllm_finish(task_inferred, query, tool_res_str, pcl_paths, det_topk, intent=intent, review=review)
-            cls_text, cls_used_fb, cls_meta = self._fallback_classification_choice(query, final_text, det_topk, pcl_paths=pcl_paths)
-            text = cls_text
-            if cls_used_fb:
-                metrics["fallback_used"] = True
-                metrics["fallback_reason"] = "classification_finish_miss_direct_choice"
-            metrics["classification_fallback"] = cls_meta
-        
-        # Reflection: one-shot validation + fallback
         text_fixed, trace = self.reflection_fix(task_inferred, intent, det_topk, selected, text)
         if trace and trace.get("applied", False):
             metrics["fallback_used"] = True
@@ -1522,10 +1556,24 @@ class Agent3D:
 
         # 4. Concatenate History
         # Format:
-        # <Pcl> [IntentUser] \n### gpt:[IntentOut] \n###human: [ReviewUser] \n### gpt:[ReviewOut] \n###human: [FinishUser] \n### gpt:
-        if intent_prompt_str and intent_output_str and review_output_str:
+        # <Pcl> [IntentUser] 
+### gpt:[IntentOut] 
+###human: [ReviewUser] 
+### gpt:[ReviewOut] 
+###human: [FinishUser] 
+### gpt:
+        if task_type == "Classification":
+            if intent_prompt_str and intent_output_str:
+                prompt = (
+                    f"{intent_prompt_str.rstrip()}\n\n"
+                    f"\n### gpt:{intent_output_str}\n###"
+                    f"human: {finish_context_user.rstrip()}\n"
+                )
+            else:
+                prompt = finish_context_user
+        elif intent_prompt_str and intent_output_str and review_output_str:
             prompt = (
-                f"{intent_prompt_str.rstrip()}\n\n" 
+                f"{intent_prompt_str.rstrip()}\n\n"
                 f"\n### gpt:{intent_output_str}\n###"
                 f"human: {review_context_user.rstrip()}\n"
                 f"\n### gpt:{review_output_str}\n###"
