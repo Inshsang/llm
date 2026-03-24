@@ -523,6 +523,70 @@ class Agent3D:
                 continue
         return out
 
+    def _safe_room_groups(self, x, max_k: int) -> List[Dict[str, Any]]:
+        if not isinstance(x, list):
+            return []
+        out = []
+        for item in x:
+            if not isinstance(item, dict):
+                continue
+            room_label = self._norm(item.get("room_label", ""))
+            if room_label not in self.ROOM_SPACE:
+                continue
+            indices = [i for i in self._safe_int_list(item.get("indices", [])) if 0 <= i < max_k]
+            if not indices:
+                continue
+            out.append({"room_label": room_label, "indices": indices})
+        return out
+
+    @staticmethod
+    def _valid_center_bbox(bbox: Any) -> bool:
+        return isinstance(bbox, list) and len(bbox) == 6 and all(isinstance(v, (int, float)) for v in bbox)
+
+    @staticmethod
+    def _extract_room_boxes_from_text(text: str) -> List[List[float]]:
+        if not isinstance(text, str):
+            return []
+        nums = [float(x) for x in re.findall(r"-?\d+\.?\d*", text)]
+        nums = nums[: (len(nums) // 6) * 6]
+        return [nums[i:i + 6] for i in range(0, len(nums), 6)]
+
+    def _validate_room_detection_finish(self, text: str) -> Tuple[bool, Dict[str, Any]]:
+        raw = (text or "").strip()
+        if not raw:
+            return False, {"reason": "empty_text", "num_boxes": 0}
+        boxes = self._extract_room_boxes_from_text(raw)
+        if not boxes:
+            return False, {"reason": "no_valid_room_box", "num_boxes": 0}
+        return True, {"reason": "ok", "num_boxes": len(boxes)}
+
+    def _fallback_room_detection_result(self, det_objs: List[Dict[str, Any]]) -> str:
+        if not det_objs:
+            return "unknown"
+        lines = []
+        seen = set()
+        for room_type, priors_raw in self.ROOM_HINTS.items():
+            if room_type not in self.ROOM_SPACE:
+                continue
+            priors = {self._norm(x) for x in priors_raw if x}
+            boxes = []
+            for obj in det_objs:
+                name = self._norm(obj.get("name", "") or obj.get("label", "") or "")
+                bbox = obj.get("BoundingBox", None) or obj.get("bbox", None)
+                if name in priors and self._valid_center_bbox(bbox):
+                    boxes.append([float(v) for v in bbox])
+            if not boxes:
+                continue
+            room_box = self.geom.union_bbox(boxes)
+            if not self._valid_center_bbox(room_box):
+                continue
+            key = tuple(round(float(v), 3) for v in room_box)
+            if key in seen:
+                continue
+            seen.add(key)
+            lines.append(f"{room_type} {[round(float(v), 3) for v in room_box]}")
+        return "\n".join(lines) if lines else "unknown"
+
     def _format_candidates_brief(self, det_topk: List[Dict[str, Any]]) -> str:
         # 给 MLLM 一个“索引->name”的轻文本锚点（真正识别可用多模态）
         lines = []
@@ -765,6 +829,8 @@ class Agent3D:
             default_plan = [{"tool": "DETECT"}, {"tool": "COUNT"}, {"tool": "FINISH"}]
         elif task_type == "PositionRelation":
             default_plan = [{"tool": "DETECT"}, {"tool": "REL_DIR"}, {"tool": "FINISH"}]
+        elif task_type == "RoomDetection":
+            default_plan = [{"tool": "DETECT"}, {"tool": "BBOX_UNION"}, {"tool": "FINISH"}]
 
         out = {
             "stage": "intent",
@@ -893,6 +959,7 @@ class Agent3D:
             "summary": "",
             "need_tool2": task_type in {"Counting"},
             "selected_object_indices": [],
+            "room_groups": [],
             "raw": raw,
             "parse_error": False,
         }
@@ -902,31 +969,34 @@ class Agent3D:
             if isinstance(js.get("need_tool2", None), bool):
                 review["need_tool2"] = js["need_tool2"]
             review["selected_object_indices"] = self._safe_int_list(js.get("selected_object_indices", []))
-            
+            if task_type == "RoomDetection":
+                review["room_groups"] = self._safe_room_groups(js.get("room_groups", []), len(det_topk))
             review["next_tool"] = {"tool": "FINISH"}
 
         else:
             review["parse_error"] = True
 
-        # 固定预算：Count 必须 tool2；VG/REL/Room 不执行 tool2
+        # 固定预算：Count 必须 tool2；Room 有 room_groups 时执行 tool2；其余默认 false
         if task_type in {"Counting"}:
             review["need_tool2"] = True
+        elif task_type == "RoomDetection":
+            review["need_tool2"] = bool(review.get("room_groups"))
         else:
             review["need_tool2"] = False
 
         # clamp indices
         k = len(det_topk)
         review["selected_object_indices"] = [i for i in review["selected_object_indices"] if 0 <= i < k]
+        if task_type == "RoomDetection":
+            review["room_groups"] = self._safe_room_groups(review.get("room_groups", []), k)
 
         # 强制校正 next_tool（与任务一致）
         if task_type == "Counting":
             review["next_tool"] = {"tool": "COUNT"}
         elif task_type == "PositionRelation":
-            # indices = review["selected_object_indices"]
-            # args = {}
-            # if len(indices) >= 1: args["A_idx"] = indices[0]
-            # if len(indices) >= 2: args["B_idx"] = indices[1]
             review["next_tool"] = {"tool": "REL_DIR"}
+        elif task_type == "RoomDetection":
+            review["next_tool"] = {"tool": "BBOX_UNION"} if review.get("room_groups") else {"tool": "FINISH"}
         else:
             review["next_tool"] = {"tool": "FINISH"}
 
@@ -1221,9 +1291,38 @@ class Agent3D:
             text = final_text
 
         elif task_inferred == "RoomDetection":
-            tool_res_str = "Tool=FINISH\n(ready)"
+            room_groups = review.get("room_groups", []) or []
+            union_lines = []
+            for group in room_groups:
+                room_label = str(group.get("room_label", "")).strip().lower()
+                indices = [i for i in self._safe_int_list(group.get("indices", [])) if 0 <= i < len(det_topk)]
+                boxes = []
+                for gi in indices:
+                    bb = det_topk[gi].get("BoundingBox", None) or det_topk[gi].get("bbox", None)
+                    if self._valid_center_bbox(bb):
+                        boxes.append([float(v) for v in bb])
+                room_box = self.geom.union_bbox(boxes) if boxes else None
+                if room_label in self.ROOM_SPACE and self._valid_center_bbox(room_box):
+                    union_lines.append(f"{room_label} -> {[round(float(v), 3) for v in room_box]}")
+
+            if union_lines:
+                tool_res_str = "Tool=BBOX_UNION\n" + "\n".join(union_lines)
+            else:
+                tool_res_str = "Tool=FINISH\n(ready)"
+
             final_text = self.mllm_finish(task_inferred, query, tool_res_str, pcl_paths, det_topk, intent=intent, review=review)
             text = final_text
+            room_valid, room_meta = self._validate_room_detection_finish(text)
+            metrics["room_finish_check"] = room_meta
+            if metrics.get("parse_error", False) or not room_valid:
+                text = self._fallback_room_detection_result(det_topk if det_topk else all_objs)
+                metrics["fallback_used"] = True
+                if metrics.get("parse_error", False):
+                    metrics["fallback_reason"] = "room_parse_error_direct_detect"
+                else:
+                    metrics["fallback_reason"] = "room_finish_parse_error_direct_detect" if union_lines else "room_group_parse_error_direct_detect"
+                if text in ["unknown", "None", "", None]:
+                    metrics["output_failed"] = True
 
         elif task_inferred == "PositionRelation":
             focus = intent.get("focus", {}) if isinstance(intent, dict) else {}

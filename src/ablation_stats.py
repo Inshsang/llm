@@ -550,12 +550,16 @@ def compute_requested_acc(scores: List[Dict[str, float]], pred: List[Dict[str, A
             "no_json_constraint_acc": 0.0,
             "no_fallback_acc": 0.0,
             "no_json_and_fallback_acc": 0.0,
+            "parse_success_rate": 0.0,
+            "fallback_trigger_rate": 0.0,
         }
 
     final_num = final_den = 0.0
     no_json_num = no_json_den = 0.0
     no_fb_num = no_fb_den = 0.0
     no_both_num = no_both_den = 0.0
+    parse_success_cnt = 0
+    fallback_cnt = 0
 
     for i in range(n):
         item = scores[i] or {}
@@ -573,6 +577,8 @@ def compute_requested_acc(scores: List[Dict[str, float]], pred: List[Dict[str, A
         no_fb_den += den
         no_both_num += 0.0 if (parse_err or fb) else num
         no_both_den += den
+        parse_success_cnt += 0 if parse_err else 1
+        fallback_cnt += 1 if fb else 0
 
     def safe_div(a: float, b: float) -> float:
         return 0.0 if b == 0 else float(a / b)
@@ -582,6 +588,8 @@ def compute_requested_acc(scores: List[Dict[str, float]], pred: List[Dict[str, A
         "no_json_constraint_acc": safe_div(no_json_num, no_json_den),
         "no_fallback_acc": safe_div(no_fb_num, no_fb_den),
         "no_json_and_fallback_acc": safe_div(no_both_num, no_both_den),
+        "parse_success_rate": safe_div(float(parse_success_cnt), float(n)),
+        "fallback_trigger_rate": safe_div(float(fallback_cnt), float(n)),
     }
 
 
@@ -627,6 +635,8 @@ def run_variant(cfg: VariantConfig, options: Optional[EvalOptions] = None) -> Li
                     "no_json_constraint_acc": np.nan,
                     "no_fallback_acc": np.nan,
                     "no_json_and_fallback_acc": np.nan,
+                    "parse_success_rate": np.nan,
+                    "fallback_trigger_rate": np.nan,
                 }
             )
             continue
@@ -698,6 +708,8 @@ def to_markdown(rows: List[Dict[str, Any]]) -> str:
         "no_json_constraint_acc",
         "no_fallback_acc",
         "no_json_and_fallback_acc",
+        "parse_success_rate",
+        "fallback_trigger_rate",
     ]
     lines = ["| " + " | ".join(cols) + " |", "|" + "|".join(["---"] * len(cols)) + "|"]
     for r in rows:
@@ -736,6 +748,8 @@ def to_aligned_table(rows: List[Dict[str, Any]]) -> str:
         ("acc_no_json", "no_json_constraint_acc"),
         ("acc_no_fb", "no_fallback_acc"),
         ("acc_no_both", "no_json_and_fallback_acc"),
+        ("parse_ok", "parse_success_rate"),
+        ("fb_rate", "fallback_trigger_rate"),
     ]
     cols = [c[0] for c in col_map]
     key_of = {c: k for c, k in col_map}
@@ -915,6 +929,8 @@ def main() -> None:
         "no_json_constraint_acc",
         "no_fallback_acc",
         "no_json_and_fallback_acc",
+        "parse_success_rate",
+        "fallback_trigger_rate",
     ]
     with open(args.out_csv, "w", encoding="utf-8", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=cols)
