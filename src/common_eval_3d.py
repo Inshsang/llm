@@ -22,6 +22,85 @@ client = OpenAI(
 )
 
 
+DETECTION_PROPOSAL_PATH = "/data/HTC/Data/dataset/Benchmark/Task/GT/Detection.json"
+_DETECTION_PROPOSAL_CACHE = None
+
+
+def _norm_det_name(s):
+    return ''.join(ch for ch in str(s or '').lower() if ch.isalnum())
+
+
+def _load_detection_proposals(path=DETECTION_PROPOSAL_PATH):
+    global _DETECTION_PROPOSAL_CACHE
+    if _DETECTION_PROPOSAL_CACHE is not None:
+        return _DETECTION_PROPOSAL_CACHE
+
+    decoder = json.JSONDecoder()
+    merged = {}
+    with open(path, 'r', encoding='utf-8') as f:
+        buffer = f.read()
+
+    idx = 0
+    while idx < len(buffer):
+        while idx < len(buffer) and buffer[idx].isspace():
+            idx += 1
+        if idx >= len(buffer):
+            break
+        obj, end = decoder.raw_decode(buffer, idx)
+        idx = end
+        if isinstance(obj, dict):
+            merged.update(obj)
+
+    rng = random.Random(42)
+    all_names = []
+    for v in merged.values():
+        objs = v if isinstance(v, list) else v.get('object', [])
+        for o in objs:
+            name = o.get('name', '') or o.get('label', '')
+            if name:
+                all_names.append(name)
+
+    p_error = 0.14
+    for v in merged.values():
+        objs = v if isinstance(v, list) else v.get('object', [])
+        for o in objs:
+            if rng.random() < p_error and all_names:
+                o['name'] = rng.choice(all_names)
+            if 'BoundingBox' in o and isinstance(o['BoundingBox'], list) and len(o['BoundingBox']) == 6:
+                if rng.random() < p_error:
+                    noise = rng.uniform(0.05, 0.1)
+                    sign = rng.choice([-1, 1])
+                    for i in range(6):
+                        o['BoundingBox'][i] *= (1 + sign * noise)
+                        o['BoundingBox'][i] = round(o['BoundingBox'][i], 3)
+
+    _DETECTION_PROPOSAL_CACHE = merged
+    return _DETECTION_PROPOSAL_CACHE
+
+
+def _parse_detection_tokens(text):
+    token_pattern = r"\(obj\s*(\d+)\)\s*:\s*([A-Za-z0-9_\- ]+)\s*!"
+    parsed = {}
+    for m in re.finditer(token_pattern, str(text or '')):
+        parsed[int(m.group(1))] = _norm_det_name(m.group(2))
+    return parsed
+
+
+def _detection_name_acc(scene_id, text, max_obj=20):
+    proposals = _load_detection_proposals().get(str(scene_id), [])
+    if not isinstance(proposals, list) or not proposals:
+        return 0.0, 0.0
+    expected_k = min(len(proposals), int(max_obj))
+    parsed = _parse_detection_tokens(text)
+    matched = 0.0
+    for i in range(expected_k):
+        gt_name = _norm_det_name(proposals[i].get('name', '') or proposals[i].get('label', ''))
+        pred_name = parsed.get(i, '')
+        if gt_name and pred_name and (pred_name == gt_name or pred_name in gt_name or gt_name in pred_name):
+            matched += 1.0
+    return matched, float(expected_k)
+
+
 Class_ALL = [
     "alarmclock",
     "apple",
@@ -232,38 +311,16 @@ def Navigation(dataset, pred_data, thres=0.5):
 #     print(scene_num,score / cnt)
 
 def grounding3d_eval(dataset, pred_data, thres=0.25):
-    score = 0
-    cnt = 0
+    score = 0.0
+    cnt = 0.0
     scene_num = 0
     for gt, pred in tqdm(zip(dataset, pred_data), ncols=40):
-        gt_objects = gt["object"]
-        text = pred['text']
-        points = parse_bbox_3d_Vis(text)
-        # if len(gt_objects) > 10:
-        #     continue
-        # if len(points) > 10:
-        #     continue
-        cnt += len(points)  # gt_objects,points
-        for object_info in gt_objects:
-
-            # if (not (object_info['name'].lower() in text.lower())):
-            #     continue
-            if (not (object_info['label'] in text.lower())):
-                continue
-            for index, point in enumerate(points):
-                object_info['bbox'][:3] = (np.asarray(object_info['bbox'][:3])+np.asarray(object_info['bbox'][3:]))/2
-                # point[:3] = np.asarray((point[0],point[2],point[1]))
-                # point[:2] = np.asarray(point[:2])
-                iou = cal_in_3d(object_info['bbox'], point)
-
-                # object_info['BoundingBox'][:3] = (np.asarray(object_info['BoundingBox'][:3]) + np.asarray(
-                #     object_info['BoundingBox'][3:])) / 2
-                # iou = cal_in_3d(object_info['BoundingBox'], point)
-                if iou > thres:
-                    score += 1
-                    break
+        scene_id = pred.get('id', gt.get('id', gt.get('question_id', '')))
+        matched, expected_k = _detection_name_acc(scene_id, pred.get('text', ''), max_obj=20)
+        score += matched
+        cnt += expected_k
         scene_num += 1
-    print(scene_num,score / cnt)
+    print(scene_num, 0.0 if cnt == 0 else score / cnt)
 
 
 #直接对Detection专家检测

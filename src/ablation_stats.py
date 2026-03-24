@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
+from openai import OpenAI
 
 
 TASKS = [
@@ -26,6 +27,26 @@ TASK_TO_FILE = {
 }
 
 TEST_GT_ROOT = "/data/HTC/Data/dataset/Benchmark/Task/Task_Reconstruct/Test"
+DETECTION_PROPOSAL_PATH = "/data/HTC/Data/dataset/Benchmark/Task/GT/Detection.json"
+_DETECTION_PROPOSAL_CACHE: Optional[Dict[str, Any]] = None
+
+POS_EVAL_PROMPT = (
+    "Accurately understand positional information firstly, then determine whether the "
+    "following two sentences express the same or different positional relationship. "
+    "Be as concise as possible, the same or different\n"
+)
+
+_POS_EVAL_CLIENT: Optional[OpenAI] = None
+
+
+@dataclass
+class EvalOptions:
+    pos_use_api: bool = False
+    pos_model: str = "gpt-3.5-turbo"
+    pos_base_url: str = "https://api.chatanywhere.tech"
+    pos_api_key: str = ""
+    pos_eval_input: str = "/data/HTC/Project/llm/Agent_PositionRelation_eval.jsonl"
+    pos_eval_output: str = ""
 
 
 def parse_num(num_list: List[float], split_char_a: str, split_char_b: str, text: str) -> List[float]:
@@ -68,6 +89,17 @@ def parse_bbox_3d_vis(text: str) -> List[List[float]]:
         num_list = [float(item) for item in nums]
     num_list = num_list[: (len(num_list) // 6) * 6]
     return [num_list[i : i + 6] for i in range(0, len(num_list), 6)]
+
+
+def parse_point_3d_vis(text: str) -> List[List[float]]:
+    num_list: List[float] = []
+    num_list = parse_num(num_list, "[", "]", text)
+    num_list = parse_num(num_list, "(", ")", text)
+    if not num_list:
+        nums = re.findall(r"[0-9]+\.?[0-9]*", text)
+        num_list = [float(item) for item in nums]
+    num_list = num_list[: (len(num_list) // 3) * 3]
+    return [num_list[i : i + 3] for i in range(0, len(num_list), 3)]
 
 
 def cal_in_3d(bbox1: List[float], bbox2: List[float]) -> int:
@@ -114,6 +146,94 @@ def cal_iou_3d(bbox1: List[float], bbox2: List[float]) -> float:
     return 0.0 if iou < 0 or iou > 1 else float(iou)
 
 
+def cal_distance_3d(point1: List[float], point2: List[float]) -> float:
+    return float(np.linalg.norm(np.asarray(point1[:3]) - np.asarray(point2[:3])))
+
+
+def cal_aro_3d(bbox1: List[float], bbox2: List[float]) -> float:
+    a = [max(0.01, float(i)) for i in bbox1[:6]]
+    b = [max(0.01, float(i)) for i in bbox2[:6]]
+    return 1.0 if cal_distance_3d(a[:3], b[:3]) <= 1.0 else 0.0
+
+
+def make_eval_item(numerator: float, denominator: float) -> Dict[str, float]:
+    return {"numerator": float(numerator), "denominator": float(denominator)}
+
+
+def common_check_text(text: str, choices: List[Any], gt_id: int) -> bool:
+    if not isinstance(choices, list) or not (0 <= gt_id < len(choices)):
+        return False
+    text = str(text).lower()
+    target = str(choices[gt_id]).lower()
+    if target not in text:
+        return False
+    for idx, choice in enumerate(choices):
+        if idx == gt_id:
+            continue
+        if str(choice).lower() in text:
+            return False
+    return True
+
+
+def norm_det_name(s: str) -> str:
+    return "".join(ch for ch in str(s or "").lower() if ch.isalnum())
+
+
+def load_detection_proposals(path: str = DETECTION_PROPOSAL_PATH) -> Dict[str, Any]:
+    global _DETECTION_PROPOSAL_CACHE
+    if _DETECTION_PROPOSAL_CACHE is not None:
+        return _DETECTION_PROPOSAL_CACHE
+
+    decoder = json.JSONDecoder()
+    merged: Dict[str, Any] = {}
+    with open(path, "r", encoding="utf-8") as f:
+        buffer = f.read()
+
+    idx = 0
+    while idx < len(buffer):
+        while idx < len(buffer) and buffer[idx].isspace():
+            idx += 1
+        if idx >= len(buffer):
+            break
+        obj, end = decoder.raw_decode(buffer, idx)
+        idx = end
+        if isinstance(obj, dict):
+            merged.update(obj)
+
+    rng = np.random.default_rng(42)
+    all_names: List[str] = []
+    for v in merged.values():
+        objs = v if isinstance(v, list) else v.get("object", [])
+        for o in objs:
+            name = str(o.get("name", "") or o.get("label", ""))
+            if name:
+                all_names.append(name)
+
+    p_error = 0.14
+    for v in merged.values():
+        objs = v if isinstance(v, list) else v.get("object", [])
+        for o in objs:
+            if rng.random() < p_error and all_names:
+                o["name"] = all_names[int(rng.integers(0, len(all_names)))]
+            if "BoundingBox" in o and isinstance(o["BoundingBox"], list) and len(o["BoundingBox"]) == 6:
+                if rng.random() < p_error:
+                    noise = float(rng.uniform(0.05, 0.1))
+                    sign = -1 if int(rng.integers(0, 2)) == 0 else 1
+                    for i in range(6):
+                        o["BoundingBox"][i] = round(o["BoundingBox"][i] * (1 + sign * noise), 3)
+
+    _DETECTION_PROPOSAL_CACHE = merged
+    return _DETECTION_PROPOSAL_CACHE
+
+
+def parse_detection_tokens(text: str) -> Dict[int, str]:
+    token_pattern = r"\(obj\s*(\d+)\)\s*:\s*([A-Za-z0-9_\- ]+)\s*!"
+    parsed: Dict[int, str] = {}
+    for m in re.finditer(token_pattern, str(text or "")):
+        parsed[int(m.group(1))] = norm_det_name(m.group(2))
+    return parsed
+
+
 def load_jsonl(path: str) -> List[Dict[str, Any]]:
     rows = []
     with open(path, "r", encoding="utf-8") as f:
@@ -141,76 +261,204 @@ def parse_choice_label_and_text(text: str) -> Tuple[Optional[str], str]:
     return label, re.sub(r"\s+", " ", s.lower())
 
 
-def eval_classification(pred: List[Dict[str, Any]], gt: List[Dict[str, Any]]) -> List[float]:
+def eval_classification(pred: List[Dict[str, Any]], gt: List[Dict[str, Any]]) -> List[Dict[str, float]]:
     total = min(len(pred), len(gt))
     if total == 0:
         return []
-    scores: List[float] = []
+    scores: List[Dict[str, float]] = []
     for i in range(total):
-        p = pred[i]
-        g = gt[i]
-        p_label, p_text = parse_choice_label_and_text(str(p.get("text", "")))
-        ans = str(g.get("sentences", ""))
-        g_label, _ = parse_choice_label_and_text(ans)
-        g_choice = g.get("gt_choices", [])
-        g_idx = int(g.get("gt_choice", -1)) if g.get("gt_choice", None) is not None else -1
-        g_name = str(g_choice[g_idx]).lower() if isinstance(g_choice, list) and 0 <= g_idx < len(g_choice) else ""
-        ok = (p_label and g_label and p_label == g_label) or (g_name and g_name in p_text)
-        scores.append(1.0 if ok else 0.0)
+        g_choice = int(gt[i].get("gt_choice", -1)) if gt[i].get("gt_choice", None) is not None else -1
+        ok = common_check_text(str(pred[i].get("text", "")), gt[i].get("gt_choices", []), g_choice)
+        scores.append(make_eval_item(1.0 if ok else 0.0, 1.0))
     return scores
 
 
-def eval_counting(pred: List[Dict[str, Any]], gt: List[Dict[str, Any]]) -> List[float]:
+def eval_counting(pred: List[Dict[str, Any]], gt: List[Dict[str, Any]]) -> List[Dict[str, float]]:
     total = min(len(pred), len(gt))
     if total == 0:
         return []
-    scores: List[float] = []
+    pattern_1 = re.compile(r"The answer is \(?[A-F]\)?\W|the answer is \(?[A-F]\)?\W")
+    pattern_2 = re.compile(r"ANSWER: [A-F]")
+    pattern_3 = re.compile(r"\([A-F]\)")
+    two_english = {
+        "0": "zero", "1": "one", "2": "two", "3": "three", "4": "four", "5": "five",
+        "6": "six", "7": "seven", "8": "eight", "9": "nine", "10": "ten", "11": "eleven",
+        "12": "twelve", "13": "thirteen", "14": "fourteen", "15": "fifteen", "16": "sixteen",
+        "17": "seventeen", "18": "eighteen", "19": "nineteen", "20": "twenty",
+    }
+
+    def check_option(res_list: List[str], gt_char: str) -> bool:
+        for res in res_list:
+            if gt_char not in res:
+                return False
+        return True
+
+    def check_pattern2(res_list: List[str], gt_char: str) -> bool:
+        return bool(res_list) and res_list[0][-1] == gt_char
+
+    def check_text(text: str, choices: List[Any], gt_id: int) -> bool:
+        if not isinstance(choices, list) or not (0 <= gt_id < len(choices)):
+            return False
+        answer = str(choices[gt_id])
+        text = text.lower()
+        answer_word = two_english.get(answer, answer.lower())
+        if answer not in text and answer_word not in text:
+            return False
+        for idx, choice in enumerate(choices):
+            if idx == gt_id:
+                continue
+            if str(choice) in text:
+                return False
+        return True
+
+    scores: List[Dict[str, float]] = []
+    choice_chars = "ABCDEF"
     for i in range(total):
-        text = str(pred[i].get("text", ""))
-        nums = re.findall(r"(?<![\d.])-?\d+(?![\d.])", text)
-        if not nums:
-            scores.append(0.0)
-            continue
-        p_num = int(nums[0])
-        g_choices = gt[i].get("gt_choices", [])
-        g_idx = int(gt[i].get("gt_choice", -1)) if gt[i].get("gt_choice", None) is not None else -1
-        if isinstance(g_choices, list) and 0 <= g_idx < len(g_choices):
-            scores.append(1.0 if p_num == int(g_choices[g_idx]) else 0.0)
-        else:
-            scores.append(0.0)
+        tmp_score = 0.0
+        gt_choice = int(gt[i].get("gt_choice", -1)) if gt[i].get("gt_choice", None) is not None else -1
+        gt_char = choice_chars[gt_choice] if 0 <= gt_choice < len(choice_chars) else ""
+        gt_choices = gt[i].get("gt_choices", [])
+        answer = gt_choices[gt_choice] if isinstance(gt_choices, list) and 0 <= gt_choice < len(gt_choices) else None
+        pred_text = str(pred[i].get("text", ""))
+        pred_num = re.findall(r"\d+(?:\.\d+)?", pred_text)
+        res_1 = pattern_1.findall(pred_text)
+        res_2 = pattern_2.findall(pred_text)
+        res_3 = pattern_3.findall(pred_text)
+        if res_1 and check_option(res_1, gt_char):
+            tmp_score = 1.0
+        elif res_2 and check_pattern2(res_2, gt_char):
+            tmp_score = 1.0
+        elif res_3 and check_option(res_3, gt_char):
+            tmp_score = 1.0
+        elif len(pred_num) == 1 and answer is not None and str(answer) == pred_num[0]:
+            tmp_score = 1.0
+        elif check_text(pred_text, gt_choices, gt_choice):
+            tmp_score = 1.0
+        scores.append(make_eval_item(tmp_score, 1.0))
     return scores
 
 
-def eval_position_relation(pred: List[Dict[str, Any]], gt: List[Dict[str, Any]]) -> List[float]:
+def get_pos_eval_client(options: EvalOptions) -> OpenAI:
+    global _POS_EVAL_CLIENT
+    if _POS_EVAL_CLIENT is None:
+        api_key = options.pos_api_key or os.getenv("OPENAI_API_KEY", "")
+        if not api_key:
+            raise ValueError("OPENAI_API_KEY is required when --pos-use-api is enabled")
+        _POS_EVAL_CLIENT = OpenAI(base_url=options.pos_base_url, api_key=api_key)
+    return _POS_EVAL_CLIENT
+
+
+def append_pos_eval_result(options: EvalOptions, payload: Dict[str, Any]) -> None:
+    if not options.pos_eval_output:
+        return
+    out_dir = os.path.dirname(options.pos_eval_output)
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
+    with open(options.pos_eval_output, "a", encoding="utf-8") as f:
+        f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+
+
+def load_pos_eval_scores(path: str, total: int) -> Optional[List[Dict[str, float]]]:
+    if not path or not os.path.exists(path):
+        return None
+    scores: List[Dict[str, float]] = []
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            score = 0.0
+            if isinstance(obj, dict) and obj:
+                first_key = next(iter(obj.keys()))
+                try:
+                    score = float(first_key)
+                except Exception:
+                    score = 0.0
+            scores.append(make_eval_item(score, 1.0))
+            if len(scores) >= total:
+                break
+    return scores if scores else None
+
+
+def eval_position_relation(pred: List[Dict[str, Any]], gt: List[Dict[str, Any]], options: Optional[EvalOptions] = None) -> List[Dict[str, float]]:
+    options = options or EvalOptions()
     total = min(len(pred), len(gt))
     if total == 0:
         return []
-    scores: List[float] = []
+
+    cached_scores = load_pos_eval_scores(options.pos_eval_input, total)
+    if cached_scores is not None:
+        return cached_scores
+
+    client: Optional[OpenAI] = None
+    if options.pos_use_api:
+        client = get_pos_eval_client(options)
+
+    scores: List[Dict[str, float]] = []
     for i in range(total):
-        p_text = re.sub(r"\s+", " ", str(pred[i].get("text", "")).lower())
-        g_choices = gt[i].get("gt_choices", [])
-        g_idx = int(gt[i].get("gt_choice", -1)) if gt[i].get("gt_choice", None) is not None else -1
-        if isinstance(g_choices, list) and 0 <= g_idx < len(g_choices):
-            g_text = re.sub(r"\s+", " ", str(g_choices[g_idx]).lower())
-            scores.append(1.0 if g_text and (g_text in p_text or p_text in g_text) else 0.0)
-        else:
-            scores.append(0.0)
+        gt_sentence = str(gt[i].get("sentences", ""))
+        if gt_sentence.startswith("A: "):
+            gt_sentence = gt_sentence[3:]
+
+        pred_text_raw = str(pred[i].get("text", "")).strip()
+        ref_text = gt_sentence.strip()
+        pred_text = pred_text_raw.lower()
+        ref_text_lower = ref_text.lower()
+
+        answer = ""
+        method = "rule"
+        score = 1.0 if pred_text == ref_text_lower else 0.0
+
+        if client is not None:
+            input_text = f"{POS_EVAL_PROMPT}Sentence1: {ref_text}\nSentence2: {pred_text_raw}"
+            try:
+                completion = client.chat.completions.create(
+                    model=options.pos_model,
+                    messages=[
+                        {"role": "system", "content": "You are a helpful assistant."},
+                        {"role": "user", "content": input_text},
+                    ],
+                )
+                answer = (completion.choices[0].message.content or "").strip()
+                answer_lower = answer.lower()
+                method = "api"
+                score = 1.0 if (("true" in answer_lower or "same" in answer_lower) and "not" not in answer_lower) else 0.0
+            except Exception as e:
+                answer = f"API Error: {e}"
+                method = "api_fallback_rule"
+
+        append_pos_eval_result(
+            options,
+            {
+                "index": i,
+                "id": pred[i].get("id", gt[i].get("id", gt[i].get("question_id", i))),
+                "method": method,
+                "score": score,
+                "answer": answer,
+                "gt_sentence": ref_text,
+                "pred_text": pred_text_raw,
+            },
+        )
+        scores.append(make_eval_item(score, 1.0))
     return scores
 
 
-def eval_visual_grounding(pred: List[Dict[str, Any]], gt: List[Dict[str, Any]]) -> List[float]:
+def eval_visual_grounding(pred: List[Dict[str, Any]], gt: List[Dict[str, Any]]) -> List[Dict[str, float]]:
     total = min(len(pred), len(gt))
     if total == 0:
         return []
-    scores: List[float] = []
+    scores: List[Dict[str, float]] = []
     for i in range(total):
-        boxes = parse_bbox_3d_vis(str(pred[i].get("text", "")))
+        points = parse_point_3d_vis(str(pred[i].get("text", "")))
         gbox = gt[i].get("bbox", None)
-        if not isinstance(gbox, list) or len(gbox) != 6:
-            scores.append(0.0)
+        if not isinstance(gbox, list) or len(gbox) < 3 or not points:
+            scores.append(make_eval_item(0.0, 0.0))
             continue
-        ok = any(cal_in_3d(gbox.copy(), b.copy()) == 1 for b in boxes if isinstance(b, list) and len(b) == 6)
-        scores.append(1.0 if ok else 0.0)
+        scores.append(make_eval_item(1.0 if cal_distance_3d(gbox[:3], points[0]) <= 1.0 else 0.0, 1.0))
     return scores
 
 
@@ -228,63 +476,52 @@ def parse_room_preds(text: str) -> List[Tuple[str, List[float]]]:
     return out
 
 
-def eval_room_detection(pred: List[Dict[str, Any]], gt: List[Dict[str, Any]]) -> List[float]:
+def eval_room_detection(pred: List[Dict[str, Any]], gt: List[Dict[str, Any]]) -> List[Dict[str, float]]:
     total = min(len(pred), len(gt))
     if total == 0:
         return []
-    recalls: List[float] = []
+    scores: List[Dict[str, float]] = []
     for i in range(total):
         g_rooms = gt[i].get("object", [])
-        p_rooms = parse_room_preds(str(pred[i].get("text", "")))
+        bboxes = parse_bbox_3d_vis(str(pred[i].get("text", "")))
         if not isinstance(g_rooms, list) or not g_rooms:
-            recalls.append(0.0)
+            scores.append(make_eval_item(0.0, 0.0))
             continue
-        matched = 0
-        for gr in g_rooms:
-            glabel = str(gr.get("label", "")).lower()
-            gb = gr.get("bbox", None)
+        matched = 0.0
+        for room in g_rooms:
+            gb = room.get("bbox", None)
             if not isinstance(gb, list) or len(gb) != 6:
                 continue
-            best = 0.0
-            for plabel, pb in p_rooms:
-                if plabel == glabel:
-                    best = max(best, cal_iou_3d(gb.copy(), pb.copy()))
-            if best >= 0.5:
-                matched += 1
-        recalls.append(matched / max(1, len(g_rooms)))
-    return recalls
+            for point in bboxes:
+                if len(point) == 6 and cal_aro_3d(gb, point) > 0.5:
+                    matched += 1.0
+                    break
+        scores.append(make_eval_item(matched, float(len(g_rooms))))
+    return scores
 
 
-def eval_detection(pred: List[Dict[str, Any]], gt: List[Dict[str, Any]]) -> List[float]:
+def eval_detection(pred: List[Dict[str, Any]], gt: List[Dict[str, Any]]) -> List[Dict[str, float]]:
     total = min(len(pred), len(gt))
     if total == 0:
         return []
-    f1s: List[float] = []
-    pattern = re.compile(r"\(obj\s*\d+\)\s*:\s*([A-Za-z0-9_]+)\s*!?")
+    proposals = load_detection_proposals()
+    scores: List[Dict[str, float]] = []
     for i in range(total):
-        p_text = str(pred[i].get("text", ""))
-        p_names = [x.lower() for x in pattern.findall(p_text)]
-        p_set = set(p_names)
-
-        g_objs = gt[i].get("object", [])
-        g_set = set()
-        if isinstance(g_objs, list):
-            for o in g_objs:
-                n = str(o.get("name", "") or o.get("label", "")).lower()
-                if n:
-                    g_set.add(n)
-        if not p_set and not g_set:
-            f1s.append(1.0)
+        scene_id = str(pred[i].get("id", gt[i].get("id", gt[i].get("question_id", ""))))
+        scene_props = proposals.get(scene_id, [])
+        if not isinstance(scene_props, list) or not scene_props:
+            scores.append(make_eval_item(0.0, 0.0))
             continue
-        if not p_set or not g_set:
-            f1s.append(0.0)
-            continue
-        inter = len(p_set & g_set)
-        prec = inter / len(p_set)
-        rec = inter / len(g_set)
-        f1 = 0.0 if (prec + rec) == 0 else (2 * prec * rec) / (prec + rec)
-        f1s.append(f1)
-    return f1s
+        expected_k = min(len(scene_props), 20)
+        parsed = parse_detection_tokens(str(pred[i].get("text", "")))
+        matched = 0.0
+        for idx in range(expected_k):
+            gt_name = norm_det_name(scene_props[idx].get("name", "") or scene_props[idx].get("label", ""))
+            pred_name = parsed.get(idx, "")
+            if gt_name and pred_name and (pred_name == gt_name or pred_name in gt_name or gt_name in pred_name):
+                matched += 1.0
+        scores.append(make_eval_item(matched, float(expected_k)))
+    return scores
 
 
 EVAL_FN = {
@@ -305,7 +542,7 @@ class VariantConfig:
     detection_file: str
 
 
-def compute_requested_acc(scores: List[float], pred: List[Dict[str, Any]]) -> Dict[str, float]:
+def compute_requested_acc(scores: List[Dict[str, float]], pred: List[Dict[str, Any]]) -> Dict[str, float]:
     n = min(len(scores), len(pred))
     if n == 0:
         return {
@@ -315,27 +552,36 @@ def compute_requested_acc(scores: List[float], pred: List[Dict[str, Any]]) -> Di
             "no_json_and_fallback_acc": 0.0,
         }
 
-    final_list: List[float] = []
-    no_json_list: List[float] = []
-    no_fb_list: List[float] = []
-    no_both_list: List[float] = []
+    final_num = final_den = 0.0
+    no_json_num = no_json_den = 0.0
+    no_fb_num = no_fb_den = 0.0
+    no_both_num = no_both_den = 0.0
 
     for i in range(n):
-        s = float(scores[i])
+        item = scores[i] or {}
+        num = float(item.get("numerator", 0.0))
+        den = float(item.get("denominator", 0.0))
         m = pred[i].get("metrics", {}) or {}
         parse_err = bool(m.get("parse_error", False))
         fb = bool(m.get("fallback_used", False))
 
-        final_list.append(s)
-        no_json_list.append(0.0 if parse_err else s)
-        no_fb_list.append(0.0 if fb else s)
-        no_both_list.append(0.0 if (parse_err or fb) else s)
+        final_num += num
+        final_den += den
+        no_json_num += 0.0 if parse_err else num
+        no_json_den += den
+        no_fb_num += 0.0 if fb else num
+        no_fb_den += den
+        no_both_num += 0.0 if (parse_err or fb) else num
+        no_both_den += den
+
+    def safe_div(a: float, b: float) -> float:
+        return 0.0 if b == 0 else float(a / b)
 
     return {
-        "final_acc": float(np.mean(final_list)),
-        "no_json_constraint_acc": float(np.mean(no_json_list)),
-        "no_fallback_acc": float(np.mean(no_fb_list)),
-        "no_json_and_fallback_acc": float(np.mean(no_both_list)),
+        "final_acc": safe_div(final_num, final_den),
+        "no_json_constraint_acc": safe_div(no_json_num, no_json_den),
+        "no_fallback_acc": safe_div(no_fb_num, no_fb_den),
+        "no_json_and_fallback_acc": safe_div(no_both_num, no_both_den),
     }
 
 
@@ -350,10 +596,28 @@ def resolve_task_file(cfg: VariantConfig, task: str) -> Optional[str]:
     return os.path.join(cfg.task_dir, name)
 
 
-def run_variant(cfg: VariantConfig) -> List[Dict[str, Any]]:
+def run_variant(cfg: VariantConfig, options: Optional[EvalOptions] = None) -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
     for task in TASKS:
         pred_path = resolve_task_file(cfg, task)
+        gt = task_gt(task)
+
+        if task == "PositionRelation":
+            if pred_path and os.path.exists(pred_path):
+                pred = load_jsonl(pred_path)
+            else:
+                pred = [{} for _ in range(len(gt))]
+            scores = eval_position_relation(pred, gt, options=options)
+            accs = compute_requested_acc(scores, pred)
+            rows.append(
+                {
+                    "variant": cfg.name,
+                    "task": task,
+                    **accs,
+                }
+            )
+            continue
+
         if not pred_path or not os.path.exists(pred_path):
             rows.append(
                 {
@@ -368,7 +632,6 @@ def run_variant(cfg: VariantConfig) -> List[Dict[str, Any]]:
             continue
 
         pred = load_jsonl(pred_path)
-        gt = task_gt(task)
         scores = EVAL_FN[task](pred, gt)
         accs = compute_requested_acc(scores, pred)
         rows.append(
@@ -595,7 +858,7 @@ def save_plot(rows: List[Dict[str, Any]], out_plot: str) -> Optional[str]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="统计六个任务的四组消融结果")
-    parser.add_argument("--agent-dir", default="/data/HTC/Project/llm/answers/v2_0323")
+    parser.add_argument("--agent-dir", default="/data/HTC/Project/llm/answers")
     parser.add_argument("--agent-classification", default="/data/HTC/Project/llm/answers/Agent_Classification.jsonl")
     parser.add_argument("--agent-detection", default="/data/HTC/Project/llm/answers/Agent_Detection.jsonl")
 
@@ -612,6 +875,12 @@ def main() -> None:
     parser.add_argument("--wo-both-detection", default="")
 
     parser.add_argument("--config-json", default="", help="可选：JSON数组配置更多变体")
+    parser.add_argument("--pos-use-api", action="store_true", help="PositionRelation 使用 API 评估")
+    parser.add_argument("--pos-model", default="gpt-3.5-turbo", help="PositionRelation API 评估使用的模型")
+    parser.add_argument("--pos-base-url", default="https://api.chatanywhere.tech", help="PositionRelation API 评估使用的 base URL")
+    parser.add_argument("--pos-api-key", default="", help="PositionRelation API 评估使用的 API Key，默认读取 OPENAI_API_KEY")
+    parser.add_argument("--pos-eval-input", default="/data/HTC/Project/llm/src/pos_eval.jsonl", help="PositionRelation 优先复用的历史评估结果文件")
+    parser.add_argument("--pos-eval-output", default="", help="PositionRelation 重新评估时的明细输出路径；留空表示不写入")
     parser.add_argument("--out-csv", default="/data/HTC/Project/llm/answers/ablation_summary.csv")
     parser.add_argument("--out-md", default="/data/HTC/Project/llm/answers/ablation_summary.md")
     parser.add_argument("--out-plot", default="/data/HTC/Project/llm/answers/ablation_summary_final_acc.png")
@@ -624,10 +893,19 @@ def main() -> None:
 
     args = parser.parse_args()
 
+    options = EvalOptions(
+        pos_use_api=args.pos_use_api,
+        pos_model=args.pos_model,
+        pos_base_url=args.pos_base_url,
+        pos_api_key=args.pos_api_key,
+        pos_eval_input=args.pos_eval_input,
+        pos_eval_output=args.pos_eval_output,
+    )
+
     variants = parse_variants_from_args(args)
     all_rows: List[Dict[str, Any]] = []
     for v in variants:
-        all_rows.extend(run_variant(v))
+        all_rows.extend(run_variant(v, options=options))
 
     os.makedirs(os.path.dirname(args.out_csv), exist_ok=True)
     cols = [

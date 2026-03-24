@@ -401,14 +401,14 @@ class Agent3D:
 
     # 小闭集（写论文“已知 label space”用）
     REL_SPACE = ["left", "right", "above", "below"]
-    ROOM_SPACE = ["bedroom", "kitchen", "livingroom", "bathroom", "diningroom", "office", "other"]
+    ROOM_SPACE = ["bedroom", "kitchen", "livingroom", "bathroom"]
 
-    # 给 Room 的最小先验（用于 MLLM 没选出来时回退）
+    # Align with RoomDetection training/eval label space.
     ROOM_HINTS = {
-        "bedroom": ["bed", "door", "wardrobe", "nightstand"],
-        "kitchen": ["fridge", "stove", "sink", "cabinet"],
-        "livingroom": ["sofa", "tv", "door", "coffeetable"],
-        "bathroom": ["toilet", "sink", "door", "shower"],
+        "bedroom": ["bed", "nightstand", "wardrobe", "dresser"],
+        "kitchen": ["refrigerator", "fridge", "microwave", "oven", "stove", "dishwasher"],
+        "livingroom": ["sofa", "tv", "television", "coffeetable"],
+        "bathroom": ["toilet", "bathtub", "showercurtain"],
     }
 
     def __init__(self, args, model: LAMMPEFTModel, det_tool: DetectionTool3D, device: torch.device,
@@ -430,6 +430,9 @@ class Agent3D:
                 print(f"[Warning] Failed to load PositionRelation templates: {e}")
         else:
              print(f"[Warning] PositionRelation templates not found at {template_path}")
+
+        self.room_detectable_vocab = self._load_room_detectable_vocab()
+        self.room_prior_map = self._build_room_prior_map()
 
     @staticmethod
     def _norm(s: str) -> str:
@@ -521,6 +524,22 @@ class Agent3D:
                 out.append(int(v))
             except Exception:
                 continue
+        return out
+
+    def _safe_room_groups(self, x, max_k: int) -> List[Dict[str, Any]]:
+        if not isinstance(x, list):
+            return []
+        out = []
+        for item in x:
+            if not isinstance(item, dict):
+                continue
+            room_label = self._norm(item.get("room_label", ""))
+            if room_label not in self.ROOM_SPACE:
+                continue
+            indices = [i for i in self._safe_int_list(item.get("indices", [])) if 0 <= i < max_k]
+            if not indices:
+                continue
+            out.append({"room_label": room_label, "indices": indices})
         return out
 
     def _format_candidates_brief(self, det_topk: List[Dict[str, Any]]) -> str:
@@ -648,16 +667,16 @@ class Agent3D:
     def _validate_detection_finish(self, text: str, det_topk: List[Dict[str, Any]]) -> Tuple[bool, Dict[str, Any]]:
         raw = (text or "").strip()
         if not raw:
-            return False, {"reason": "empty_text"}
+            return False, {"reason": "empty_text", "parse_error": True, "fallback_needed": True}
 
         max_k = min(len(det_topk), int(self.args.max_obj))
         if max_k <= 0:
-            return False, {"reason": "no_expected_objects"}
+            return False, {"reason": "no_expected_objects", "parse_error": True, "fallback_needed": True}
 
         token_pattern = r"\(obj\s*(\d+)\)\s*:\s*([A-Za-z0-9_\- ]+)\s*!"
         token_matches = list(re.finditer(token_pattern, raw))
         if not token_matches:
-            return False, {"reason": "pattern_not_found"}
+            return False, {"reason": "pattern_not_found", "parse_error": True, "fallback_needed": True}
 
         parsed_indices = []
         parsed_names = {}
@@ -669,7 +688,12 @@ class Agent3D:
 
         in_range = [i for i in parsed_indices if 0 <= i < max_k]
         if not in_range:
-            return False, {"reason": "index_out_of_range", "max_k": max_k}
+            return False, {
+                "reason": "index_out_of_range",
+                "max_k": max_k,
+                "parse_error": True,
+                "fallback_needed": True,
+            }
 
         uniq = sorted(set(in_range))
         coverage = len(uniq) / max(1, max_k)
@@ -684,26 +708,20 @@ class Agent3D:
             if pred_name == gt_name or pred_name in gt_name or gt_name in pred_name:
                 name_match += 1
 
-        # Relaxed acceptance to avoid over-strict false fallbacks:
-        # - at least 40% unique-index coverage, OR
-        # - >=3 unique valid objects parsed.
-        # Name mismatch alone won't fail validation.
-        if coverage >= 0.4 or len(uniq) >= 3:
-            return True, {
-                "reason": "ok_relaxed",
-                "count": len(token_matches),
-                "valid_unique": len(uniq),
-                "coverage": round(coverage, 4),
-                "name_match": name_match,
-            }
-
-        return False, {
-            "reason": "coverage_too_low",
+        meta = {
             "count": len(token_matches),
             "valid_unique": len(uniq),
             "coverage": round(coverage, 4),
+            "name_match": name_match,
             "max_k": max_k,
         }
+
+        if coverage >= 0.4 or len(uniq) >= 3:
+            meta.update({"reason": "ok_relaxed", "parse_error": False, "fallback_needed": False})
+            return True, meta
+
+        meta.update({"reason": "ok_partial", "parse_error": True, "fallback_needed": False})
+        return True, meta
 
     def _validate_room_detection_finish(self, text: str) -> Tuple[bool, Dict[str, Any]]:
         raw = (text or "").strip()
@@ -727,24 +745,120 @@ class Agent3D:
                 out.append([float(v) for v in b])
         return out
 
-    def _fallback_room_detection_result(self, det_topk: List[Dict[str, Any]]) -> str:
-        candidates: List[List[float]] = []
-        seen = set()
-        for o in det_topk[: max(1, int(self.args.max_obj))]:
-            bb = o.get("BoundingBox", None)
-            if isinstance(bb, list) and len(bb) == 6:
-                key = tuple(round(float(v), 3) for v in bb)
-                if key in seen:
-                    continue
-                seen.add(key)
-                candidates.append([round(float(v), 3) for v in bb])
+    def _load_room_detectable_vocab(self) -> set:
+        classall_path = "/data/HTC/Data/dataset/Benchmark/Task/GT/ClassAll.json"
+        classall_norm = set()
+        try:
+            with open(classall_path, "r") as f:
+                classall_data = json.load(f)
+            if isinstance(classall_data, list):
+                classall_norm = {self._norm(x) for x in classall_data if isinstance(x, str) and x.strip()}
+        except Exception as e:
+            print(f"[Warning] Failed to load ClassAll.json: {e}")
 
-        if not candidates:
+        det_norm = set()
+        try:
+            self.det_tool._lazy_load()
+            data = getattr(self.det_tool, "_data", None)
+            if isinstance(data, dict):
+                for v in data.values():
+                    objs = v if isinstance(v, list) else v.get("object", [])
+                    for o in objs:
+                        name = self._norm(o.get("name", "") or o.get("label", "") or "")
+                        if name:
+                            det_norm.add(name)
+        except Exception as e:
+            print(f"[Warning] Failed to build detectable room vocab: {e}")
+
+        if classall_norm and det_norm:
+            return classall_norm & det_norm
+        return classall_norm or det_norm
+
+    def _build_room_prior_map(self) -> Dict[str, List[str]]:
+        allowed = self.room_detectable_vocab or set()
+        out: Dict[str, List[str]] = {}
+        for room, names in self.ROOM_HINTS.items():
+            filtered = []
+            for name in names:
+                name_norm = self._norm(name)
+                if allowed and name_norm not in allowed:
+                    continue
+                filtered.append(name_norm)
+            out[room] = filtered
+        return out
+
+    @staticmethod
+    def _valid_center_bbox(bbox: Any) -> bool:
+        return isinstance(bbox, list) and len(bbox) == 6 and all(isinstance(v, (int, float)) for v in bbox)
+
+    def _expand_room_bbox_from_objects(self, bboxes: List[List[float]]) -> Optional[List[float]]:
+        if not bboxes:
+            return None
+
+        mm_boxes = [self.geom._to_minmax(b) for b in bboxes]
+        min_x = min(b[0] for b in mm_boxes)
+        min_y = min(b[1] for b in mm_boxes)
+        min_z = min(b[2] for b in mm_boxes)
+        max_x = max(b[3] for b in mm_boxes)
+        max_y = max(b[4] for b in mm_boxes)
+        max_z = max(b[5] for b in mm_boxes)
+
+        extent_x = max_x - min_x
+        extent_y = max_y - min_y
+        pad_x = max(0.8, extent_x * 0.35)
+        pad_y = max(0.8, extent_y * 0.35)
+
+        room_min_x = min_x - pad_x
+        room_max_x = max_x + pad_x
+        room_min_y = min_y - pad_y
+        room_max_y = max_y + pad_y
+        room_min_z = min(min_z, 0.0)
+        room_max_z = max(max_z + 0.5, 2.8)
+
+        return self.geom._from_minmax([
+            room_min_x, room_min_y, room_min_z,
+            room_max_x, room_max_y, room_max_z,
+        ], "center")
+
+    def _fallback_room_detection_result(self, det_objs: List[Dict[str, Any]]) -> str:
+        if not det_objs:
             return "unknown"
 
-        # Keep a compact set to avoid overly long outputs while preserving coverage.
-        k = min(8, len(candidates))
-        lines = [f"room{i+1} {candidates[i]}" for i in range(k)]
+        room_boxes = []
+        seen_boxes = set()
+        for room_type in ["bedroom", "bathroom", "kitchen", "livingroom"]:
+            priors = set(self.room_prior_map.get(room_type, []) or [])
+            if not priors:
+                continue
+
+            matched_boxes = []
+            for obj in det_objs:
+                name = self._norm(obj.get("name", "") or obj.get("label", "") or "")
+                bbox = obj.get("BoundingBox", None) or obj.get("bbox", None)
+                if name in priors and self._valid_center_bbox(bbox):
+                    matched_boxes.append([float(v) for v in bbox])
+
+            if not matched_boxes:
+                continue
+
+            room_box = self._expand_room_bbox_from_objects(matched_boxes)
+            if not self._valid_center_bbox(room_box):
+                continue
+
+            key = tuple(round(float(v), 3) for v in room_box)
+            if key in seen_boxes:
+                continue
+            seen_boxes.add(key)
+            room_boxes.append((room_type, len(matched_boxes), room_box))
+
+        if not room_boxes:
+            return "unknown"
+
+        room_boxes.sort(key=lambda x: (-x[1], x[0]))
+        lines = []
+        for room_type, _, room_box in room_boxes[:6]:
+            box = [round(float(v), 3) for v in room_box]
+            lines.append(f"{room_type} {box}")
         return "\n".join(lines)
 
     def _fallback_classification_choice(
@@ -968,6 +1082,7 @@ class Agent3D:
             "summary": "",
             "need_tool2": task_type in {"Counting"},
             "selected_object_indices": [],
+            "room_groups": [],
             "raw": raw,
             "parse_error": False,
         }
@@ -977,7 +1092,9 @@ class Agent3D:
             if isinstance(js.get("need_tool2", None), bool):
                 review["need_tool2"] = js["need_tool2"]
             review["selected_object_indices"] = self._safe_int_list(js.get("selected_object_indices", []))
-            
+            if task_type == "RoomDetection":
+                review["room_groups"] = self._safe_room_groups(js.get("room_groups", []), len(det_topk))
+
             review["next_tool"] = {"tool": "FINISH"}
 
         else:
@@ -986,16 +1103,22 @@ class Agent3D:
         # 固定预算：Count 必须 tool2；VG/REL/Room 不执行 tool2
         if task_type in {"Counting"}:
             review["need_tool2"] = True
+        elif task_type == "RoomDetection":
+            review["need_tool2"] = bool(review.get("room_groups"))
         else:
             review["need_tool2"] = False
 
         # clamp indices
         k = len(det_topk)
         review["selected_object_indices"] = [i for i in review["selected_object_indices"] if 0 <= i < k]
+        if task_type == "RoomDetection":
+            review["room_groups"] = self._safe_room_groups(review.get("room_groups", []), k)
 
         # 强制校正 next_tool（与任务一致）
         if task_type == "Counting":
             review["next_tool"] = {"tool": "COUNT"}
+        elif task_type == "RoomDetection":
+            review["next_tool"] = {"tool": "BBOX_UNION"} if review.get("room_groups") else {"tool": "FINISH"}
         elif task_type == "PositionRelation":
             # indices = review["selected_object_indices"]
             # args = {}
@@ -1166,10 +1289,7 @@ class Agent3D:
                 return False
 
             if task_inferred == "RoomDetection":
-                import random
-                det_room_input = all_objs[:]
-                random.shuffle(det_room_input)
-                det_topk = det_room_input[:int(self.args.max_obj)]
+                det_topk = all_objs[:int(self.args.max_obj)]
 
             elif task_inferred in ["Counting", "VisualGrounding_plus", "PositionRelation"]:
                 target_kws = []
@@ -1296,15 +1416,33 @@ class Agent3D:
             text = final_text
 
         elif task_inferred == "RoomDetection":
-            tool_res_str = "Tool=FINISH\n(ready)"
+            room_groups = review.get("room_groups", []) or []
+            union_lines = []
+            for group in room_groups:
+                room_label = str(group.get("room_label", "")).strip().lower()
+                indices = [i for i in self._safe_int_list(group.get("indices", [])) if 0 <= i < len(det_topk)]
+                boxes = []
+                for gi in indices:
+                    bb = det_topk[gi].get("BoundingBox", None) or det_topk[gi].get("bbox", None)
+                    if self._valid_center_bbox(bb):
+                        boxes.append([float(v) for v in bb])
+                room_box = self.geom.union_bbox(boxes) if boxes else None
+                if room_label in self.ROOM_SPACE and self._valid_center_bbox(room_box):
+                    union_lines.append(f"{room_label} -> {room_box}")
+
+            if union_lines:
+                tool_res_str = "Tool=BBOX_UNION\n" + "\n".join(union_lines)
+            else:
+                tool_res_str = "Tool=FINISH\n(ready)"
+                metrics["parse_error"] = metrics.get("parse_error", False) or True
             final_text = self.mllm_finish(task_inferred, query, tool_res_str, pcl_paths, det_topk, intent=intent, review=review)
             text = final_text
             room_valid, room_meta = self._validate_room_detection_finish(text)
             metrics["room_finish_check"] = room_meta
             if not room_valid:
-                text = self._fallback_room_detection_result(det_topk)
+                text = self._fallback_room_detection_result(all_objs if all_objs else det_topk)
                 metrics["fallback_used"] = True
-                metrics["fallback_reason"] = "room_finish_parse_error_direct_detect"
+                metrics["fallback_reason"] = "room_finish_parse_error_direct_detect" if union_lines else "room_group_parse_error_direct_detect"
                 if text in ["unknown", "None", "", None]:
                     metrics["output_failed"] = True
 
@@ -1431,7 +1569,8 @@ class Agent3D:
             text = final_text
             finish_valid, det_meta = self._validate_detection_finish(text, det_topk)
             metrics["detection_finish_check"] = det_meta
-            if not finish_valid:
+            metrics["parse_error"] = metrics.get("parse_error", False) or bool(det_meta.get("parse_error", False))
+            if not finish_valid and det_meta.get("fallback_needed", True):
                 text = self._format_detection_result(det_topk)
                 metrics["fallback_used"] = True
                 metrics["fallback_reason"] = "detection_finish_miss_direct_detect"
