@@ -23,6 +23,7 @@ ckpt/
 ckpt3d/
 
 *.jsonl
+answers/ablation_summary*
 
 
 # assets related

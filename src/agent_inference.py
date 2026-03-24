@@ -551,6 +551,50 @@ class Agent3D:
             lines.append(f"{i}: name={name}, bbox={bbox}")
         return "\n".join(lines)
 
+    def _format_detect_list(self, det_topk: List[Dict[str, Any]]) -> str:
+        lines = []
+        for i, o in enumerate(det_topk[:self.args.max_obj]):
+            name = (o.get("name", "") or o.get("label", "") or "unknown").lower()
+            bbox = o.get("BoundingBox", None) or o.get("bbox", None)
+            lines.append(f"(obj{i}):{name} bbox={bbox}")
+        return "\n".join(lines)
+
+    def _build_intent_prompt(self, query: str) -> str:
+        return (
+            "[AGENT_INTENT]\n"
+            f"UserQuestion: {query}\n\n"
+            "You are an MLLM agent controller. Output ONE JSON only.\n"
+            "Schema:\n"
+            "{\n"
+            "  \"stage\":\"intent\",\n"
+            "  \"task\":\"VisualGrounding_plus|Counting|RoomDetection|PositionRelation|Detection|Classification\",\n"
+            "  \"focus\": {\"target\":\"\", \"A\":\"\", \"B\":\"\"}\n"
+            "}\n"
+        )
+
+    def _build_review_prompt(self, query: str, det_topk: List[Dict[str, Any]]) -> str:
+        detect_text = self._format_detect_list(det_topk)
+        return (
+            "[TOOL_RESULT]\n"
+            "Tool=DETECT\n"
+            f"Objects(topk={len(det_topk)}):\n{detect_text}\n\n"
+            "[AGENT_REVIEW]\n"
+            f"UserQuestion: {query}\n\n"
+            "Output ONE JSON only.\n"
+        )
+
+    def _build_finish_prompt(self, query: str, tool2_result_text: str) -> str:
+        return (
+            "[TOOL_RESULT]\n"
+            f"{tool2_result_text}\n\n"
+            "[AGENT_FINISH]\n"
+            f"UserQuestion: {query}\n\n"
+            "Output the FINAL answer only (no JSON).\n"
+            "For Counting: output a single integer (already matched to choices).\n"
+            "For PositionRelation: output the final option / statement consistent with the question.\n"
+            "For RoomDetection: output all room_label + bbox, one room per sentence.\n"
+        )
+
     def _find_by_keywords_fallback(self, det_topk: List[Dict[str, Any]], keywords: List[str]) -> List[int]:
         kws = [self._norm(k) for k in (keywords or []) if k]
         if not kws:
@@ -717,7 +761,10 @@ class Agent3D:
         }
 
         # Detection finish should faithfully restate the detector proposals.
-        # Any missing object or name mismatch should fall back to direct DETECT output.
+        # Distinguish parse errors from quality failures:
+        # - parse_error=True only when the text cannot be reliably parsed.
+        # - insufficient coverage / name mismatch are parseable-but-bad, so they still fallback
+        #   but should not be counted as parse errors.
         if len(uniq) == max_k and name_match >= len(uniq):
             meta.update({"reason": "ok_exact", "parse_error": False, "fallback_needed": False})
             return True, meta
@@ -725,7 +772,7 @@ class Agent3D:
         reason = "insufficient_coverage"
         if len(uniq) == max_k and name_match < len(uniq):
             reason = "name_mismatch"
-        meta.update({"reason": reason, "parse_error": True, "fallback_needed": True})
+        meta.update({"reason": reason, "parse_error": False, "fallback_needed": True})
         return False, meta
 
     def _validate_room_detection_finish(self, text: str) -> Tuple[bool, Dict[str, Any]]:
@@ -824,6 +871,41 @@ class Agent3D:
             room_min_x, room_min_y, room_min_z,
             room_max_x, room_max_y, room_max_z,
         ], "center")
+
+    def _select_room_detection_candidates(self, all_objs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        if not all_objs:
+            return []
+
+        max_obj = int(self.args.max_obj)
+        per_room_quota = max(1, max_obj // max(1, len(self.ROOM_SPACE)))
+        selected = []
+        used = set()
+
+        for room_type in self.ROOM_SPACE:
+            priors = {self._norm(x) for x in (self.room_prior_map.get(room_type, []) or []) if x}
+            if not priors:
+                continue
+            taken = 0
+            for idx, obj in enumerate(all_objs):
+                if idx in used:
+                    continue
+                name = self._norm(obj.get("name", "") or obj.get("label", "") or "")
+                if name in priors:
+                    selected.append(obj)
+                    used.add(idx)
+                    taken += 1
+                    if taken >= per_room_quota or len(selected) >= max_obj:
+                        break
+            if len(selected) >= max_obj:
+                return selected[:max_obj]
+
+        for idx, obj in enumerate(all_objs):
+            if idx in used:
+                continue
+            selected.append(obj)
+            if len(selected) >= max_obj:
+                break
+        return selected[:max_obj]
 
     def _fallback_room_detection_result(self, det_objs: List[Dict[str, Any]]) -> str:
         if not det_objs:
@@ -939,7 +1021,7 @@ class Agent3D:
                     }
             return False, {
                 "reason": "invalid_label",
-                "parse_error": True,
+                "parse_error": False,
                 "fallback_needed": True,
                 "label": lb,
             }
@@ -955,6 +1037,14 @@ class Agent3D:
                     "chosen": l,
                 }
 
+        if raw_norm:
+            return False, {
+                "reason": "answer_not_in_options",
+                "parse_error": False,
+                "fallback_needed": True,
+                "raw_text": raw,
+            }
+
         return False, {
             "reason": "pattern_not_found",
             "parse_error": True,
@@ -968,11 +1058,7 @@ class Agent3D:
         """
         # Reconstruct the prompt to match the training data format.
         # NOTE: prepare_generation_embedding adds "</Pcl> " and "\n### gpt:" automatically.
-        inst = (
-            "[AGENT_INTENT]\n"
-            f"UserQuestion: {query}\n\n"
-            # "You are an MLLM agent controller. Output ONE JSON only.\n"
-        )
+        inst = self._build_intent_prompt(query)
 
         out = mllm_generate_one(
             self.args,
@@ -1043,16 +1129,6 @@ class Agent3D:
                 "next_tool": {"tool": "FINISH"},
             }
 
-        # Format detected objects similar to training data.
-        obj_lines = []
-        for i, o in enumerate(det_topk[:self.args.max_obj]):
-            name = (o.get("name", "") or o.get("label", "") or "").lower()
-            raw_box = o.get("BoundingBox", None)
-            bbox_str = str(raw_box) if raw_box else "None"
-            obj_lines.append(f"{name}{bbox_str}")
-        
-        obj_text = "\n".join(obj_lines)
-
         # IMPORTANT:
         # openlamm.prepare_generation_embedding will wrap the provided prompt as:
         #   "</Pcl> " + prompt + "\n### gpt:"
@@ -1067,14 +1143,7 @@ class Agent3D:
         intent_output_str = re.sub(r'"args":\s*\{[^}]*\},\s*', '', intent_output_str)
 
         # 2. Build Review Context
-        review_context = (
-            "[TOOL_RESULT]\n"
-            "Tool=DETECT\n"
-            f"Objects(topk={len(det_topk)}):\n{obj_text}\n\n"
-            "[AGENT_REVIEW]\n"
-            # f"UserQuestion: {query}\n\n"
-            # "Output ONE JSON only.\n"
-        )
+        review_context = self._build_review_prompt(query, det_topk)
 
         # 3. Combine: intent_prompt + response + review_context
         # The underlying `prepare_generation_embedding` adds the FINAL "\n### gpt:".
@@ -1339,7 +1408,7 @@ class Agent3D:
                 return False
 
             if task_inferred == "RoomDetection":
-                det_topk = all_objs[:int(self.args.max_obj)]
+                det_topk = self._select_room_detection_candidates(all_objs)
 
             elif task_inferred in ["Counting", "VisualGrounding_plus", "PositionRelation"]:
                 target_kws = []
@@ -1529,34 +1598,42 @@ class Agent3D:
             # Using det_topk keeps response aligned with the agent's "DETECT topk" idea.
             search_space = det_topk if det_topk else all_objs
 
+            pos_fallback_reasons = []
+
             if metrics.get("num_selected_instances", 0) == 0:
                 metrics["fallback_used"] = True
-                metrics["fallback_reason"] = "positionrelation_zero_selected"
+                pos_fallback_reasons.append("positionrelation_zero_selected")
                 print("[过程数据] 阶段: PositionRelation, 触发兜底: num_selected_instances=0")
+            elif metrics.get("num_selected_instances", 0) < 2:
+                metrics["fallback_used"] = True
+                pos_fallback_reasons.append("positionrelation_one_selected")
+                print("[过程数据] 阶段: PositionRelation, 触发兜底: num_selected_instances<2")
 
             a_hits = _find_matches(search_space, focus_a)
             b_hits = _find_matches(search_space, focus_b)
 
             # Fallback if intent missing or no hits.
             fallback_applied = False
-            fallback_reason = []
             if not a_hits:
                 a_hits = list(range(len(search_space)))
                 fallback_applied = True
-                fallback_reason.append("A_not_found")
+                pos_fallback_reasons.append("A_not_found")
             if not b_hits:
                 b_hits = list(range(len(search_space)))
                 fallback_applied = True
-                fallback_reason.append("B_not_found")
+                pos_fallback_reasons.append("B_not_found")
             
             if fallback_applied:
                 metrics["fallback_used"] = True
-                metrics["fallback_reason"] = ",".join(fallback_reason)
+                metrics["fallback_reason"] = ",".join(pos_fallback_reasons)
                 print(f"[过程数据] 阶段: PositionRelation, 触发兜底: {metrics['fallback_reason']}")
                 # If target objects are completely missing, computing a random relation is meaningless.
                 text = "unknown"
                 metrics["output_failed"] = True
             else:
+                if pos_fallback_reasons:
+                    metrics["fallback_used"] = True
+                    metrics["fallback_reason"] = ",".join(pos_fallback_reasons)
                 a_idx = a_hits[0] if a_hits else 0
                 b_idx = b_hits[0] if b_hits else (1 if len(search_space) > 1 else 0)
                 
@@ -1639,10 +1716,15 @@ class Agent3D:
             cls_text, cls_used_fb, cls_meta = self._fallback_classification_choice(query, final_text, det_topk, pcl_paths=pcl_paths)
             text = cls_text
             if not finish_valid:
-                print(f"[过程数据] 阶段: Finish, Classification 解析失败, 当前输出: {final_text}")
+                status = "解析失败" if cls_finish_meta.get("parse_error", False) else "答案不在选项内"
+                print(f"[过程数据] 阶段: Finish, Classification {status}, 当前输出: {final_text}")
             if cls_used_fb:
                 metrics["fallback_used"] = True
-                metrics["fallback_reason"] = "classification_finish_miss_direct_choice"
+                metrics["fallback_reason"] = (
+                    "classification_finish_parse_error_direct_choice"
+                    if cls_finish_meta.get("parse_error", False)
+                    else "classification_answer_not_in_options_direct_choice"
+                )
             metrics["classification_fallback"] = cls_meta
         
         # Reflection: one-shot validation + fallback
@@ -1668,15 +1750,6 @@ class Agent3D:
 
         simplified = _simplify_bbox_numbers(tool2_result_text)
         
-        # Format detected objects list for review string reconstruction
-        obj_lines = []
-        for i, o in enumerate(obj_list[:self.args.max_obj]):
-            name = (o.get("name", "") or o.get("label", "") or "").lower()
-            raw_box = o.get("BoundingBox", None)
-            bbox_str = str(raw_box) if raw_box else "None"
-            obj_lines.append(f"{name}{bbox_str}")
-        obj_text = "\n".join(obj_lines)
-
         # 1. Retrieve Intent Context
         intent_prompt_str = intent.get("prompt", "") if intent else ""
         intent_output_str = intent.get("raw", "") if intent else ""
@@ -1687,14 +1760,7 @@ class Agent3D:
             intent_output_str = re.sub(r'"args":\s*\{[^}]*\},\s*', '', intent_output_str) 
 
         # 2. Build Review Context (MUST MATCH mllm_review_multimodal)
-        review_context_user = (
-            "[TOOL_RESULT]\n"
-            "Tool=DETECT\n"
-            f"Objects(topk={len(obj_list)}):\n{obj_text}\n\n"
-            "[AGENT_REVIEW]\n"
-            # f"UserQuestion: {user_question}\n\n"
-            # "Output ONE JSON only.\n"
-        )
+        review_context_user = self._build_review_prompt(user_question, obj_list)
         review_output_str = review.get("raw", "") if review else ""
         # Remove 'args' from review output string
         if review_output_str:
@@ -1702,11 +1768,7 @@ class Agent3D:
             review_output_str = re.sub(r'"args":\s*\{[^}]*\},\s*', '', review_output_str)
 
         # 3. Build Finish Context
-        finish_context_user = (
-            "[TOOL_RESULT]\n" +
-            f"{simplified}\n\n" +
-            "[AGENT_FINISH]\n" 
-        )
+        finish_context_user = self._build_finish_prompt(user_question, simplified)
 
         # 4. Concatenate History
         # Format:
