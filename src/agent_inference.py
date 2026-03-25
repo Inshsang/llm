@@ -110,8 +110,9 @@ def mllm_generate_one(
     temperature,
 ):
     """多模态 MLLM 生成：让模型真正看到 pcl + proposals（obj_list）"""
-    # NOTE: In this script we run Agent3d with use_system=False, so sys_msg is intentionally ignored.
-    # We keep the parameter to stay API-compatible with other callers.
+    # NOTE: For the shell-script-trained agent data, samples use top-level task_type=Agent3d.
+    # conversation_dict["Agent3d"] is empty, so use_system=False does not drop a meaningful
+    # task-specific system prompt for the agent pipeline here. We keep sys_msg only for API compatibility.
     _ = sys_msg
     safe_temperature = max(temperature, 1e-5)
     safe_top_p = min(max(top_p, 1e-5), 1.0)
@@ -709,6 +710,54 @@ class Agent3D:
             parts.append(f"(obj{i}):{name}!")
         return " ".join(parts) if parts else "unknown"
 
+    def _extract_detection_prefix(self, text: str, det_topk: List[Dict[str, Any]]) -> Tuple[Optional[str], Dict[str, Any]]:
+        raw = (text or "").strip()
+        if not raw:
+            return None, {"reason": "empty_text", "parse_error": True, "semantic_mismatch": False, "fallback_needed": True}
+
+        matches = list(re.finditer(r"\(obj\s*(\d+)\)\s*:\s*([A-Za-z0-9_]+)\s*!?", raw))
+        if not matches:
+            return None, {"reason": "pattern_not_found", "parse_error": True, "semantic_mismatch": False, "fallback_needed": True}
+
+        max_k = min(len(det_topk), int(self.args.max_obj))
+        if len(matches) < max_k:
+            return None, {
+                "reason": "prefix_too_short",
+                "count": len(matches),
+                "expected_k": max_k,
+                "parse_error": True,
+                "semantic_mismatch": False,
+                "fallback_needed": True,
+            }
+
+        prefix_matches = matches[:max_k]
+        prefix_indices = [int(m.group(1)) for m in prefix_matches]
+        expected = list(range(max_k))
+        if prefix_indices != expected:
+            return None, {
+                "reason": "prefix_incomplete_or_misordered",
+                "got": prefix_indices[:10],
+                "expected_k": max_k,
+                "parse_error": True,
+                "semantic_mismatch": False,
+                "fallback_needed": True,
+            }
+
+        parts = []
+        for idx, m in enumerate(prefix_matches):
+            parts.append(f"(obj{idx}):{m.group(2).strip().lower()}!")
+
+        return " ".join(parts), {
+            "reason": "prefix_complete",
+            "count": len(prefix_matches),
+            "raw_count": len(matches),
+            "max_k": max_k,
+            "truncated_suffix": len(matches) > max_k,
+            "parse_error": False,
+            "semantic_mismatch": False,
+            "fallback_needed": False,
+        }
+
     def _validate_detection_finish(self, text: str, det_topk: List[Dict[str, Any]]) -> Tuple[bool, Dict[str, Any]]:
         raw = (text or "").strip()
         if not raw:
@@ -733,13 +782,11 @@ class Agent3D:
         if len(set(parsed_indices)) != len(parsed_indices):
             return False, {"reason": "duplicate_indices", "parse_error": True, "semantic_mismatch": False, "fallback_needed": True}
 
-        # Training target is deterministic full list obj0..obj{k-1}
         expected = list(range(max_k))
         got = sorted(parsed_indices)
         if got != expected:
             return False, {"reason": "indices_incomplete_or_extra", "got": got[:10], "expected_k": max_k, "parse_error": True, "semantic_mismatch": False, "fallback_needed": True}
 
-        # Keep parser readability separate from semantic label alignment.
         name_match = 0
         for i in expected:
             gt_name = self._norm(det_topk[i].get("name", "") or det_topk[i].get("label", "") or "")
@@ -913,6 +960,29 @@ class Agent3D:
                 "need_tool2": False,
                 "selected_object_indices": list(range(min(len(det_topk), int(self.args.max_obj)))),
                 "raw": '{"stage":"review","summary":"classification_placeholder"}',
+                "parse_error": False,
+                "next_tool": {"tool": "FINISH"},
+            }
+
+        if task_type == "Detection":
+            # Detection agent training uses a deterministic review turn: all current proposals are kept
+            # and the final decision is delegated to FINISH. Generating this review again at inference
+            # adds instability without adding information.
+            selected = list(range(min(len(det_topk), int(self.args.max_obj))))
+            raw = json.dumps({
+                "stage": "review",
+                "summary": "Output all detected objects in the requested format.",
+                "selected_object_indices": selected,
+                "room_groups": [],
+                "next_tool": {"tool": "FINISH", "args": {}},
+            }, ensure_ascii=False)
+            return {
+                "stage": "review",
+                "summary": "Output all detected objects in the requested format.",
+                "need_tool2": False,
+                "selected_object_indices": selected,
+                "room_groups": [],
+                "raw": raw,
                 "parse_error": False,
                 "next_tool": {"tool": "FINISH"},
             }
@@ -1484,13 +1554,21 @@ class Agent3D:
             tool_res_str = "Tool=FINISH\n(ready)"
             final_text = self.mllm_finish(task_inferred, query, tool_res_str, pcl_paths, det_topk, intent=intent, review=review)
             text = final_text
-            finish_valid, det_meta = self._validate_detection_finish(text, det_topk)
-            metrics["detection_finish_check"] = det_meta
-            metrics["parse_error"] = det_meta.get("parse_error", False)
-            if not finish_valid:
+            prefix_text, prefix_meta = self._extract_detection_prefix(text, det_topk)
+            if prefix_text is not None:
+                text = prefix_text
+                _, det_meta = self._validate_detection_finish(text, det_topk)
+                det_meta["prefix_complete"] = True
+                det_meta["prefix_truncated_suffix"] = bool(prefix_meta.get("truncated_suffix", False))
+                metrics["detection_finish_check"] = det_meta
+                metrics["parse_error"] = det_meta.get("parse_error", False)
+            else:
+                metrics["detection_finish_check"] = prefix_meta
+                metrics["parse_error"] = prefix_meta.get("parse_error", False)
                 text = self._format_detection_result(det_topk)
                 metrics["fallback_used"] = True
                 metrics["fallback_reason"] = "detection_finish_miss_direct_detect"
+                metrics["parse_error"] = False
 
         text_fixed, trace = self.reflection_fix(task_inferred, intent, det_topk, selected, text)
         if trace and trace.get("applied", False):
