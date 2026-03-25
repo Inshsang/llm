@@ -1,104 +1,66 @@
 #!/bin/bash
+#numgpu=1
 
-set -euo pipefail
+exp=$1
+dataname=$2
+visfeat_type=local
+now=$(date +"%Y%m%d_%H%M%S")
 
-# Usage:
-#   ./train_lamm3d_openlamm.sh <exp_name> [cuda_visible_devices]
-# Example:
-#   ./train_lamm3d_openlamm.sh lamm3d_openlamm 1
-#   ./train_lamm3d_openlamm.sh lamm3d_openlamm 1,2
-#
-# The second argument uses physical GPU ids for CUDA_VISIBLE_DEVICES.
-# Inside DeepSpeed these GPUs are remapped to localhost:0..N-1.
+python_bin=/data/HTC/Library/lamm/bin/python
+deepspeed_bin=/data/HTC/Library/lamm/bin/deepspeed
+cfg_path=/data/HTC/Project/llm/src/config/train_ds3.yaml
+data_root=/data/HTC/Data/dataset/Benchmark/data/LAMM/3D_Instruct
+data_path=${data_root}/meta_file/LAMM_3dinstruct_10k.json
+encoder_ckpt_path=/data/HTC/Data/model_zoo/epcl_ckpt/epcl_scannet_vit-L-14_256tokens_latest.pth
+vicuna_ckpt_path=/data/HTC/Data/model_zoo/vicuna-7b/Vicuna_7B_v0
+ckpt_dir=/data/HTC/Data/model_zoo/llm_exe
 
-EXP_NAME=${1:-lamm3d_openlamm}
-CUDA_DEVICES=${2:-0}
-MASTER_PORT=${MASTER_PORT:-28461}
-NOW=$(date +"%Y%m%d_%H%M%S")
-VISFEAT_TYPE=local
+mkdir -p ${ckpt_dir}/${exp}/log_rest/
 
-PROJECT_ROOT=/data/HTC/Project/llm
-SRC_DIR=${PROJECT_ROOT}/src
-
-PYTHON_BIN=/data/HTC/Library/lamm/bin/python
-DEEPSPEED_BIN=/data/HTC/Library/lamm/bin/deepspeed
-
-CFG_PATH=${SRC_DIR}/config/train_ds3.yaml
-DATA_ROOT=/data/HTC/Data/dataset/Benchmark/data/LAMM/3D_Instruct
-DATA_PATH=${DATA_ROOT}/meta_file/LAMM_3dinstruct_10k.json
-EPCL_CKPT=/data/HTC/Data/model_zoo/epcl_ckpt/epcl_scannet_vit-L-14_256tokens_latest.pth
-VICUNA_CKPT=/data/HTC/Data/model_zoo/vicuna-7b/Vicuna_7B_v0
-
-CKPT_ROOT=/data/HTC/Data/model_zoo/llm_exe
-SAVE_PATH=${CKPT_ROOT}/${EXP_NAME}
-LOG_PATH=${SAVE_PATH}/log_rest
-
-mkdir -p "${LOG_PATH}"
-
-if [ ! -x "${PYTHON_BIN}" ]; then
-    echo "Python not found: ${PYTHON_BIN}" >&2
+if [ ! -x "${python_bin}" ]; then
+    echo "Python not found: ${python_bin}" >&2
     exit 1
 fi
 
-if [ ! -x "${DEEPSPEED_BIN}" ]; then
-    echo "DeepSpeed not found: ${DEEPSPEED_BIN}" >&2
+if [ ! -x "${deepspeed_bin}" ]; then
+    echo "DeepSpeed not found: ${deepspeed_bin}" >&2
     exit 1
 fi
 
-if [ ! -f "${DATA_PATH}" ]; then
-    echo "Training meta file not found: ${DATA_PATH}" >&2
+if [ ! -f "${data_path}" ]; then
+    echo "Training meta file not found: ${data_path}" >&2
     exit 1
 fi
 
-if [ ! -f "${EPCL_CKPT}" ]; then
-    echo "EPCL checkpoint not found: ${EPCL_CKPT}" >&2
+if [ ! -f "${encoder_ckpt_path}" ]; then
+    echo "EPCL checkpoint not found: ${encoder_ckpt_path}" >&2
     exit 1
 fi
 
-if [ ! -d "${VICUNA_CKPT}" ]; then
-    echo "Vicuna checkpoint directory not found: ${VICUNA_CKPT}" >&2
+if [ ! -d "${vicuna_ckpt_path}" ]; then
+    echo "Vicuna checkpoint directory not found: ${vicuna_ckpt_path}" >&2
     exit 1
 fi
 
-if [ ! -d "${DATA_ROOT}/3rscan_pcls" ] || [ ! -d "${DATA_ROOT}/shapenet_pcls" ]; then
-    echo "OpenLAMM 3D data is still zipped. Please unzip 3rscan_pcls.zip and shapenet_pcls.zip under ${DATA_ROOT} before training." >&2
+if [ ! -d "${data_root}/3rscan_pcls" ] || [ ! -d "${data_root}/shapenet_pcls" ]; then
+    echo "OpenLAMM 3D data is still zipped. Please unzip 3rscan_pcls.zip and shapenet_pcls.zip under ${data_root} before training." >&2
     exit 1
 fi
 
-IFS=',' read -r -a GPU_ARRAY <<< "${CUDA_DEVICES}"
-GPU_COUNT=${#GPU_ARRAY[@]}
-
-if [ "${GPU_COUNT}" -le 0 ]; then
-    echo "No GPU selected. Example: 0 or 1,2" >&2
-    exit 1
-fi
-
-DEEPSPEED_SLOTS=$(seq -s, 0 $((GPU_COUNT - 1)))
-
-export CUDA_VISIBLE_DEVICES="${CUDA_DEVICES}"
-export PYTHONPATH="${SRC_DIR}:${PYTHONPATH:-}"
-
-cd "${SRC_DIR}"
-
-echo "EXP_NAME=${EXP_NAME}"
-echo "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}"
-echo "DeepSpeed include=localhost:${DEEPSPEED_SLOTS}"
-echo "DATA_PATH=${DATA_PATH}"
-echo "SAVE_PATH=${SAVE_PATH}"
-
-"${DEEPSPEED_BIN}" --include "localhost:${DEEPSPEED_SLOTS}" --master_addr 127.0.0.1 --master_port "${MASTER_PORT}" train.py \
+cd /data/HTC/Project/llm/src
+"${deepspeed_bin}" --include localhost:1 --master_addr 127.0.0.1 --master_port 28451 train.py \
     --train_stage 3 \
-    --cfg "${CFG_PATH}" \
-    --data_path "${DATA_PATH}" \
-    --vision_root_path "${DATA_ROOT}" \
+    --cfg ${cfg_path} \
+    --data_path ${data_path} \
+    --vision_root_path ${data_root} \
     --vision_type pcl \
     --use_system \
     --model lamm_peft \
     --encoder_pretrain epcl \
-    --encoder_ckpt_path "${EPCL_CKPT}" \
-    --vicuna_ckpt_path "${VICUNA_CKPT}" \
-    --vision_feature_type "${VISFEAT_TYPE}" \
+    --encoder_ckpt_path ${encoder_ckpt_path} \
+    --vicuna_ckpt_path ${vicuna_ckpt_path} \
+    --vision_feature_type ${visfeat_type} \
     --num_vision_token 256 \
-    --save_path "${SAVE_PATH}" \
-    --log_path "${LOG_PATH}" \
-    2>&1 | tee "${LOG_PATH}/train_${NOW}.log"
+    --save_path ${ckpt_dir}/${exp} \
+    --log_path ${ckpt_dir}/${exp}/log_rest/ \
+    2>&1 | tee ${ckpt_dir}/${exp}/log_rest/train_${now}.log
