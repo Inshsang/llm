@@ -812,13 +812,14 @@ class LAMMPEFTModel(nn.Module):
         #处理vis_embed_list,scene
         if task_type[0] in ['Classification3d','DescriptionObj3d','ConversationObj3d']:
             obj_numpy = np.load(points_path)
-            x, y, z = np.mean(obj_numpy, axis=0)
-            w, l, h = np.max(np.abs(obj_numpy), axis=0)
+            obj_xyz = obj_numpy[:, :3] if obj_numpy.ndim == 2 and obj_numpy.shape[1] >= 3 else obj_numpy
+            x, y, z = np.mean(obj_xyz, axis=0)
+            w, l, h = np.max(np.abs(obj_xyz), axis=0)
             class_box_gt = [[round(x, 1), round(y, 1), round(z, 1)]]
             # class_box_gt = [[round(x, 2), round(y, 2), round(z, 2), round(w, 2), round(l, 2), round(h, 2)]]
 
-            # class_embed = np.load(points_path)
-            class_embed, _ = self.encode_obj_pcl(self.device, [obj_numpy])
+            # EPCL expects xyz-only inputs; OpenLAMM ShapeNet samples may include rgb.
+            class_embed, _ = self.encode_obj_pcl(self.device, [obj_xyz])
             class_embed = self.llama_proj(class_embed)
             vis_embed_list = class_embed
         elif task_type[0]=="Detection3d":

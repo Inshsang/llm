@@ -15,6 +15,7 @@
 import copy
 import os
 import json
+import re
 
 import numpy as np
 from tqdm import tqdm
@@ -386,8 +387,10 @@ class LAMMDataset(Dataset):
 
     def __getitem__(self, i):
         """get one sample"""
-        task_type = self.task_type_list[i]
+        raw_task_type = self.task_type_list[i]
+        task_type = raw_task_type
         vision_path = self.vision_path_list[i]
+        output_texts = self.caption_list[i]
 
         def _scene_id_from_path(path: str) -> str:
             stem = os.path.splitext(os.path.basename(path))[0]
@@ -402,18 +405,71 @@ class LAMMDataset(Dataset):
                 return digits
             return stem
 
-        if self.task_type_list[i] in ['Classification3d','DescriptionObj3d','ConversationObj3d']:#Detection,Counting,'Classification3d',PositionRelation,VG,RoomDetection,Navigation
+        def _normalize_openlamm_task(task_name: str) -> str:
+            mapping = {
+                'classification3d': 'Classification3d',
+                'detection3d': 'Detection3d',
+                'conversation3d': 'conversation3d',
+                'description3d': 'description3d',
+                'VQA3d': 'VQA3d',
+            }
+            return mapping.get(task_name, task_name)
+
+        def _extract_openlamm_boxes(conversations):
+            if not conversations or len(conversations) < 2:
+                return [], []
+            answer = conversations[1].get('value', '')
+            boxes = []
+            for coords in re.findall(r'\[([^\]]+)\]', answer):
+                try:
+                    nums = [float(x.strip()) for x in coords.split(',')]
+                except ValueError:
+                    continue
+                if len(nums) >= 6:
+                    boxes.append(nums[:6])
+            labels = ['scene'] * len(boxes)
+            return boxes, labels
+
+        def _scene_box_from_npy(path: str):
+            pcl = np.load(path)
+            if pcl.ndim != 2 or pcl.shape[1] < 3:
+                raise ValueError(f'Unexpected point cloud shape for OpenLAMM sample: {path} -> {pcl.shape}')
+            xyz = pcl[:, :3]
+            xyz_min = xyz.min(axis=0)
+            xyz_max = xyz.max(axis=0)
+            center = ((xyz_min + xyz_max) / 2.0).tolist()
+            size = (xyz_max - xyz_min).tolist()
+            return center + size
+
+        is_openlamm_sample = ('/LAMM/3D_Instruct/' in vision_path) or ('3rscan_pcls/' in vision_path) or ('shapenet_pcls/' in vision_path)
+        if is_openlamm_sample:
+            task_type = _normalize_openlamm_task(raw_task_type)
+            if raw_task_type == 'classification3d':
+                points_path = vision_path
+                label_path = os.path.basename(vision_path)
+            elif raw_task_type == 'detection3d':
+                points_path, label_path = _extract_openlamm_boxes(output_texts)
+                if not points_path:
+                    points_path = [_scene_box_from_npy(vision_path)]
+                    label_path = ['scene']
+            elif raw_task_type in ['conversation3d', 'description3d', 'VQA3d']:
+                points_path = [_scene_box_from_npy(vision_path)]
+                label_path = ['scene']
+            else:
+                points_path = [_scene_box_from_npy(vision_path)]
+                label_path = ['scene']
+        elif raw_task_type in ['Classification3d', 'DescriptionObj3d', 'ConversationObj3d']:
             key = vision_path
             if key not in self.map_class2points:
                 key = os.path.basename(key)
             points_path = self.map_class2points[key]
             label_path = self.map_class2labels[key]
-        elif task_type in ['Detection3d']:
+        elif raw_task_type in ['Detection3d']:
             scene_id = _scene_id_from_path(vision_path)
             points_path = self.scene_gt[scene_id]['Multi_class']
             label_path = self.scene_gt[scene_id]['classes']
             vision_path = '/data/HTC/Data/dataset/Benchmark/data/scene/' + scene_id + '.ply'
-        elif task_type in ['Agent3d']:
+        elif raw_task_type in ['Agent3d']:
             scene_id = _scene_id_from_path(vision_path)
             points_path = self.scene_gt[scene_id]['boxes']
             label_path = self.scene_gt[scene_id]['classes']
@@ -425,7 +481,7 @@ class LAMMDataset(Dataset):
             vision_path = '/data/HTC/Data/dataset/Benchmark/data/scene/' + scene_id + '.ply'
         return dict(
             vision_paths=vision_path,
-            output_texts=self.caption_list[i],
+            output_texts=output_texts,
             vision_type=self.vision_type,
             task_type=task_type,
             points_path = points_path,
