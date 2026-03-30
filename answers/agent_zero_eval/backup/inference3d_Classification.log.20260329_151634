@@ -1,0 +1,80 @@
+/data/HTC/Library/lamm/lib/python3.9/site-packages/deepspeed/runtime/zero/linear.py:49: FutureWarning: `torch.cuda.amp.custom_fwd(args...)` is deprecated. Please use `torch.amp.custom_fwd(args..., device_type='cuda')` instead.
+  def forward(ctx, input, weight, bias=None):
+/data/HTC/Library/lamm/lib/python3.9/site-packages/deepspeed/runtime/zero/linear.py:67: FutureWarning: `torch.cuda.amp.custom_bwd(args...)` is deprecated. Please use `torch.amp.custom_bwd(args..., device_type='cuda')` instead.
+  def backward(ctx, grad_output):
+/data/HTC/Library/lamm/lib/python3.9/site-packages/transformers/utils/generic.py:260: FutureWarning: `torch.utils._pytree._register_pytree_node` is deprecated. Please use `torch.utils._pytree.register_pytree_node` instead.
+  torch.utils._pytree._register_pytree_node(
+/data/HTC/Library/lamm/lib/python3.9/site-packages/transformers/utils/generic.py:260: FutureWarning: `torch.utils._pytree._register_pytree_node` is deprecated. Please use `torch.utils._pytree.register_pytree_node` instead.
+  torch.utils._pytree._register_pytree_node(
+/data/HTC/Library/lamm/lib/python3.9/site-packages/torchvision/io/image.py:13: UserWarning: Failed to load image Python extension: libtorch_cuda_cu.so: cannot open shared object file: No such file or directory
+  warn(f"Failed to load image Python extension: {e}")
+Setting ds_accelerator to cuda (auto detect)
+INFO 03-27 19:57:15 [cache_tensor_manager.py:17] USE_GPU_TENSOR_CACHE is On
+WARNING 03-27 19:57:15 [sgl_utils.py:14] sgl_kernel is not installed, you can't use the api of it.                    You can solve it by running `pip install sgl_kernel`.
+WARNING 03-27 19:57:15 [sgl_utils.py:29] sgl_kernel is not installed, or the installed version did not support fa3.         Try to upgrade it.
+WARNING 03-27 19:57:15 [vllm_utils.py:18] vllm is not installed, you can't use the api of it.                    You can solve it by running `pip install vllm`.
+WARNING 03-27 19:57:15 [light_utils.py:13] lightllm_kernel is not installed, you can't use the api of it.
+WARNING 03-27 19:57:15 [grouped_fused_moe_ep.py:28] no deepep or deep_gemm
+INFO 03-27 19:57:15 [communication_op.py:57] deep_ep is not installed, you can't use the api of it.
+{
+    "answers_dir": "/data/HTC/Project/llm/answers/agent_zero_inference3d",
+    "base_data_path": "/data/HTC/Data/dataset/Benchmark/data",
+    "bs": 1,
+    "choose": true,
+    "conv_mode": "simple",
+    "delta_ckpt_path": "/data/HTC/Data/model_zoo/llm_exe/agent_zero/pytorch_model.pt",
+    "encoder_ckpt_path": "/data/HTC/Data/model_zoo/epcl_ckpt/epcl_scannet_vit-L-14_256tokens_latest.pth",
+    "encoder_pretrain": "epcl",
+    "inference_mode": "common",
+    "local_rank": 0,
+    "lora_alpha": 32,
+    "lora_dropout": 0.1,
+    "lora_r": 32,
+    "lora_target_modules": [
+        "q_proj",
+        "k_proj",
+        "v_proj",
+        "o_proj"
+    ],
+    "max_obj_len": 30,
+    "max_tgt_len": 1200,
+    "model": "lamm_peft",
+    "num_vision_token": 256,
+    "stage": 2,
+    "task_type": "Classification",
+    "train_stage": 2,
+    "vicuna_ckpt_path": "/data/HTC/Data/model_zoo/vicuna-7b/Vicuna_7B_v0",
+    "vision_feature_type": "local",
+    "vision_output_layer": -2
+}
+Loading PointBERT config from /data/HTC/Project/llm/src/model/pointbert/PointTransformer_base_8192point.yaml.
+Visual encoder initialized.
+Initializing language decoder from /data/HTC/Data/model_zoo/vicuna-7b/Vicuna_7B_v0 ...
+Loading checkpoint shards:   0%|          | 0/2 [00:00<?, ?it/s]Loading checkpoint shards:  50%|█████     | 1/2 [01:19<01:19, 79.43s/it]Loading checkpoint shards: 100%|██████████| 2/2 [01:47<00:00, 49.19s/it]Loading checkpoint shards: 100%|██████████| 2/2 [01:47<00:00, 53.73s/it]
+Some weights of LlamaForCausalLM were not initialized from the model checkpoint at /data/HTC/Data/model_zoo/vicuna-7b/Vicuna_7B_v0 and are newly initialized: ['model.layers.7.self_attn.rotary_emb.inv_freq', 'model.layers.3.self_attn.rotary_emb.inv_freq', 'model.layers.0.self_attn.rotary_emb.inv_freq', 'model.layers.31.self_attn.rotary_emb.inv_freq', 'model.layers.24.self_attn.rotary_emb.inv_freq', 'model.layers.9.self_attn.rotary_emb.inv_freq', 'model.layers.12.self_attn.rotary_emb.inv_freq', 'model.layers.27.self_attn.rotary_emb.inv_freq', 'model.layers.29.self_attn.rotary_emb.inv_freq', 'model.layers.8.self_attn.rotary_emb.inv_freq', 'model.layers.16.self_attn.rotary_emb.inv_freq', 'model.layers.23.self_attn.rotary_emb.inv_freq', 'model.layers.13.self_attn.rotary_emb.inv_freq', 'model.layers.18.self_attn.rotary_emb.inv_freq', 'model.layers.11.self_attn.rotary_emb.inv_freq', 'model.layers.1.self_attn.rotary_emb.inv_freq', 'model.layers.5.self_attn.rotary_emb.inv_freq', 'model.layers.19.self_attn.rotary_emb.inv_freq', 'model.layers.10.self_attn.rotary_emb.inv_freq', 'model.layers.22.self_attn.rotary_emb.inv_freq', 'model.layers.4.self_attn.rotary_emb.inv_freq', 'model.layers.21.self_attn.rotary_emb.inv_freq', 'model.layers.15.self_attn.rotary_emb.inv_freq', 'model.layers.20.self_attn.rotary_emb.inv_freq', 'model.layers.26.self_attn.rotary_emb.inv_freq', 'model.layers.2.self_attn.rotary_emb.inv_freq', 'model.layers.30.self_attn.rotary_emb.inv_freq', 'model.layers.17.self_attn.rotary_emb.inv_freq', 'model.layers.6.self_attn.rotary_emb.inv_freq', 'model.layers.28.self_attn.rotary_emb.inv_freq', 'model.layers.14.self_attn.rotary_emb.inv_freq', 'model.layers.25.self_attn.rotary_emb.inv_freq']
+You should probably TRAIN this model on a down-stream task to be able to use it for predictions and inference.
+You are using the default legacy behaviour of the <class 'transformers.models.llama.tokenization_llama.LlamaTokenizer'>. If you see this, DO NOT PANIC! This is expected, and simply means that the `legacy` (previous) behavior will be used so nothing changes for you. If you want to use the new behaviour, set `legacy=True`. This should only be set if you understand what it means, and thouroughly read the reason why this was added as explained in https://github.com/huggingface/transformers/pull/24565
+######################## Initial LLM ##########################
+Froeze ll.
+Language decoder initialized.
+LLaMa projection layer initialized.
+[!] merging LoRA weights from /data/HTC/Data/model_zoo/llm_exe/agent_zero/pytorch_model.pt ...
+Traceback (most recent call last):
+  File "/data/HTC/Project/llm/src/inference_3d.py", line 414, in <module>
+    main(args)
+  File "/data/HTC/Project/llm/src/inference_3d.py", line 308, in main
+    model = model.eval().half().to(device)
+  File "/data/HTC/Library/lamm/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1369, in to
+    return self._apply(convert)
+  File "/data/HTC/Library/lamm/lib/python3.9/site-packages/torch/nn/modules/module.py", line 928, in _apply
+    module._apply(fn)
+  File "/data/HTC/Library/lamm/lib/python3.9/site-packages/torch/nn/modules/module.py", line 928, in _apply
+    module._apply(fn)
+  File "/data/HTC/Library/lamm/lib/python3.9/site-packages/torch/nn/modules/module.py", line 928, in _apply
+    module._apply(fn)
+  [Previous line repeated 3 more times]
+  File "/data/HTC/Library/lamm/lib/python3.9/site-packages/torch/nn/modules/module.py", line 955, in _apply
+    param_applied = fn(param)
+  File "/data/HTC/Library/lamm/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1355, in convert
+    return t.to(
+torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 86.00 MiB. GPU 0 has a total capacity of 47.37 GiB of which 49.81 MiB is free. Process 3092257 has 3.62 GiB memory in use. Process 3007811 has 16.53 GiB memory in use. Process 3016655 has 16.24 GiB memory in use. Including non-PyTorch memory, this process has 10.52 GiB memory in use. Of the allocated memory 10.03 GiB is allocated by PyTorch, and 55.08 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)

@@ -169,13 +169,37 @@ def Class_response(args,
     :param str sys_msg: system message for test
     :return list: list of response
     """
-    pcl_paths[0] = "/data/HTC/Data/dataset/object_npy/" + pcl_paths[0][29:]
+    raw_path = pcl_paths[0]
+    candidate_paths = []
+    if os.path.isabs(raw_path):
+        candidate_paths.append(raw_path)
+    else:
+        candidate_paths.append(os.path.join(args.base_data_path, raw_path))
+
+    sample_name = os.path.basename(raw_path)
+    candidate_paths.extend(
+        [
+            os.path.join("/data/HTC/Data/dataset/object_1024_npy", sample_name),
+            os.path.join("/data/HTC/Data/dataset/object_npy", sample_name),
+        ]
+    )
+
+    for candidate in candidate_paths:
+        if os.path.exists(candidate):
+            pcl_paths[0] = candidate
+            break
+    else:
+        raise FileNotFoundError(
+            f"Cannot resolve classification point cloud path from {raw_path}; "
+            f"checked: {candidate_paths}"
+        )
+
     history = predict(
         args=args,
         model=model,
         input=input,
         pcl_paths=pcl_paths,
-        max_length=1800,
+        max_length=96,
         top_p=0.6,
         temperature=0.7,
         history=[],
@@ -272,14 +296,16 @@ def Detection_response(args,
 
 
 def main(args):
-    # # load model
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if device.type == "cuda":
+        torch.cuda.set_device(0)
+
     model = LAMMPEFTModel(**args.__dict__)
-    # delta_ckpt = torch.load(args.delta_ckpt_path, map_location=torch.device('cpu'))
-    # model.load_state_dict(delta_ckpt, strict=False)
-    # print(f'[!] merging LoRA weights ...')
-    # model.llama_model = model.llama_model.merge_and_unload()
-    # model = model.eval().half().cuda()
-    # Visualization(model).structure_graph()
+    delta_ckpt = torch.load(args.delta_ckpt_path, map_location='cpu', mmap=True)
+    model.load_state_dict(delta_ckpt, strict=False)
+    print(f'[!] merging LoRA weights from {args.delta_ckpt_path} ...')
+    model.llama_model = model.llama_model.merge_and_unload()
+    model = model.eval().half().to(device)
     print(f'[!] init the LLM over ...')
     
     # load data

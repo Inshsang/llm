@@ -339,7 +339,10 @@ class LAMMPEFTModel(nn.Module):
             # self.point_backbone.load_checkpoint("/media/kou/Data1/htc/Point-BERT/ckpts/Point-BERT.pth")
 
             # load state dict
-            map_location = {'cuda:%d' % 0: 'cuda:%d' % args['local_rank']}
+            if torch.cuda.is_available():
+                map_location = {'cuda:%d' % 0: 'cuda:%d' % args['local_rank']}
+            else:
+                map_location = torch.device("cpu")
             state_dict = torch.load("/data/HTC/Project/Point-BERT/experiments/PointTransformer_8192point/ModelNet_models/test/ckpt-best.pth", map_location=map_location)
             # parameter resume of base model
             # if args.local_rank == 0:
@@ -388,6 +391,12 @@ class LAMMPEFTModel(nn.Module):
         self.llama_model = LlamaForCausalLM.from_pretrained(vicuna_ckpt_path)
         self.llama_model = get_peft_model(self.llama_model, peft_config)
         print("######################## Initial LLM ##########################")
+        if hasattr(self.llama_model, "gradient_checkpointing_enable"):
+            self.llama_model.gradient_checkpointing_enable()
+        if hasattr(self.llama_model, "enable_input_require_grads"):
+            self.llama_model.enable_input_require_grads()
+        if hasattr(self.llama_model.config, "use_cache"):
+            self.llama_model.config.use_cache = False
 
         
         self.llama_proj = nn.Sequential(
@@ -438,6 +447,9 @@ class LAMMPEFTModel(nn.Module):
         print("LLaMa projection layer initialized.")
 
         self.max_tgt_len = args["max_tgt_len"]
+        self.max_context_len = int(
+            getattr(self.llama_model.config, "max_position_embeddings", 2048)
+        )
         self.use_system = use_system
         self.use_flash_attn = args.get('use_flash_attn', False)
         self.use_xformers = args.get('use_xformers', False)
@@ -791,28 +803,78 @@ class LAMMPEFTModel(nn.Module):
         vis_embed_list = self.llama_proj(vis_embed_list)
         return vis_embed_list
 
+    def _task_key(self, task_type):
+        if isinstance(task_type, (list, tuple)):
+            return task_type[0]
+        return task_type
+
+    def _prompt_token_len(self, task_type):
+        prompt_start = make_prompt_start(
+            use_system=self.use_system,
+            vision_type=self.vision_type,
+            task_type=task_type,
+        )
+        if isinstance(prompt_start, list):
+            prompt_start = prompt_start[0]
+        return len(
+            self.llama_tokenizer(prompt_start, add_special_tokens=False).input_ids
+        )
+
+    def _fit_object_count(self, class_box_gt, task_type, requested_max_obj):
+        requested_max_obj = min(len(class_box_gt), requested_max_obj)
+        if requested_max_obj <= 1:
+            return requested_max_obj
+
+        prompt_token_len = self._prompt_token_len(task_type)
+        min_text_tokens = min(self.max_tgt_len, 256)
+        object_budget = max(
+            0, self.max_context_len - (1 + prompt_token_len + min_text_tokens)
+        )
+
+        used_tokens = 0
+        keep_count = 0
+        for index, box in enumerate(class_box_gt[:requested_max_obj]):
+            object_text = f"obj{index}{box}!"
+            object_text_len = len(
+                self.llama_tokenizer(object_text, add_special_tokens=False).input_ids
+            )
+            object_cost = 1 + object_text_len
+            if keep_count > 0 and used_tokens + object_cost > object_budget:
+                break
+            used_tokens += object_cost
+            keep_count += 1
+
+        return max(1, keep_count)
+
     def forward(self, inputs):
         # image_paths = inputs['image_paths']
         assert (
             self.vision_type == inputs["vision_type"]
         ), "{} expected but {} given".format(self.valid_type, inputs["vision_type"])
         task_type = inputs["task_type"]
+        task_key = self._task_key(task_type)
         vision_paths = inputs["vision_paths"]
         Bbox = inputs["points_path"]
         label_path = inputs["label_path"]
 
-        if task_type[0] in ['Agent3d','VisualGrounding3d','Detection3d',"PositionRelation","Counting","Navigation","RoomDetection3d"]:
-            self.max_tgt_len = self.max_tgt_len
-            max_obj = 20
+        if task_key in ['Agent3d','VisualGrounding3d','Detection3d',"PositionRelation","Counting","Navigation","RoomDetection3d"]:
+            requested_max_obj = max(1, self.max_obj_len)
         else:
-            self.max_tgt_len = self.max_tgt_len
-            max_obj = 1
+            requested_max_obj = 1
         vis_embed_list,class_box_gt = [],[]
         points_path = Bbox[0]
         #处理vis_embed_list,scene
-        if task_type[0] in ['Classification3d','DescriptionObj3d','ConversationObj3d']:
+        if task_key in ['Classification3d','DescriptionObj3d','ConversationObj3d']:
             obj_numpy = np.load(points_path)
             obj_xyz = obj_numpy[:, :3] if obj_numpy.ndim == 2 and obj_numpy.shape[1] >= 3 else obj_numpy
+            if obj_xyz.ndim != 2 or obj_xyz.shape[1] < 3:
+                raise ValueError(f'Unexpected classification point shape: {points_path} -> {obj_xyz.shape}')
+            target_points = 8192
+            n_points = obj_xyz.shape[0]
+            if n_points == 0:
+                raise ValueError(f'Empty classification point cloud: {points_path}')
+            sample_idx = np.random.choice(n_points, target_points, replace=(n_points < target_points))
+            obj_xyz = obj_xyz[sample_idx]
             x, y, z = np.mean(obj_xyz, axis=0)
             w, l, h = np.max(np.abs(obj_xyz), axis=0)
             class_box_gt = [[round(x, 1), round(y, 1), round(z, 1)]]
@@ -822,11 +884,11 @@ class LAMMPEFTModel(nn.Module):
             class_embed, _ = self.encode_obj_pcl(self.device, [obj_xyz])
             class_embed = self.llama_proj(class_embed)
             vis_embed_list = class_embed
-        elif task_type[0]=="Detection3d":
+        elif task_key == "Detection3d":
             vis_numpy_list = [{"BoundingBox": i} for i in points_path]
             for i in points_path:
                 class_box_gt.append([round(i[0], 1), round(i[1], 1), round(i[2], 1)])
-            vis_embed_list = self.train_encode_pcl(vision_paths,vis_numpy_list[:max_obj])
+            vis_embed_list = self.train_encode_pcl(vision_paths, vis_numpy_list[:requested_max_obj])
 
         else:
             vis_numpy_list = [{"BoundingBox": i} for i in points_path]
@@ -836,14 +898,17 @@ class LAMMPEFTModel(nn.Module):
                 # class_box_gt.append([round(x, 2), round(y, 2), round(z, 2), round(w, 2), round(l, 2), round(h, 2)])
                 class_box_gt.append([round(i[0], 1), round(i[1], 1), round(i[2], 1)])
 
-            vis_embed_list = self.train_encode_pcl(vision_paths,vis_numpy_list[:max_obj])
+            vis_embed_list = self.train_encode_pcl(vision_paths, vis_numpy_list[:requested_max_obj])
 
             #vis_embeds, _ = self.encode_obj_pcl(self.device, vis_numpy_list[:max_obj])
             # vis_embeds = self.llama_proj(vis_embeds)
             # vis_embed_list = embeding_list
 
+        max_obj = self._fit_object_count(class_box_gt, task_key, requested_max_obj)
+        vis_embed_list = vis_embed_list[:max_obj]
+        class_box_gt = class_box_gt[:max_obj]
         batch_input_ids = []
-        for index,b in enumerate(class_box_gt[:max_obj]):
+        for index,b in enumerate(class_box_gt):
             class_name = 'obj'+str(index)+str(b)+'!'
             class_name = self.llama_tokenizer(class_name, add_special_tokens=False).input_ids
             batch_input_ids.append(torch.LongTensor(class_name))
@@ -863,12 +928,19 @@ class LAMMPEFTModel(nn.Module):
             vision_embeds_my.append(torch.cat(vision_embeds_my_b))
 
         vision_embeds = torch.cat(vision_embeds_my).unsqueeze(dim=0)
+        sample_max_tgt_len = min(
+            self.max_tgt_len,
+            max(
+                1,
+                self.max_context_len
+                - (1 + self._prompt_token_len(task_key) + vision_embeds.size(1)),
+            ),
+        )
 
         output_texts = inputs["output_texts"]
         input_ids, target_ids, attention_mask = process_batch_instance(
-            self.llama_tokenizer, output_texts, self.max_tgt_len, self.vision_type
+            self.llama_tokenizer, output_texts, sample_max_tgt_len, self.vision_type
         )
-        print(target_ids.shape)
         inputs_embeds, targets, attention_mask = self.prompt_wrap(
             vision_embeds,
             input_ids,

@@ -48,6 +48,7 @@ if [ ! -d "${data_root}/3rscan_pcls" ] || [ ! -d "${data_root}/shapenet_pcls" ];
 fi
 
 cd /data/HTC/Project/llm/src
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 "${deepspeed_bin}" --include localhost:1 --master_addr 127.0.0.1 --master_port 28451 train.py \
     --train_stage 3 \
     --cfg ${cfg_path} \
@@ -60,6 +61,7 @@ cd /data/HTC/Project/llm/src
     --encoder_ckpt_path ${encoder_ckpt_path} \
     --vicuna_ckpt_path ${vicuna_ckpt_path} \
     --vision_feature_type ${visfeat_type} \
+    --max_tgt_len 384 \
     --num_vision_token 256 \
     --save_path ${ckpt_dir}/${exp} \
     --log_path ${ckpt_dir}/${exp}/log_rest/ \

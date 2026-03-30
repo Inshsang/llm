@@ -1,0 +1,65 @@
+/data/HTC/Library/lamm/lib/python3.9/site-packages/deepspeed/runtime/zero/linear.py:49: FutureWarning: `torch.cuda.amp.custom_fwd(args...)` is deprecated. Please use `torch.amp.custom_fwd(args..., device_type='cuda')` instead.
+  def forward(ctx, input, weight, bias=None):
+/data/HTC/Library/lamm/lib/python3.9/site-packages/deepspeed/runtime/zero/linear.py:67: FutureWarning: `torch.cuda.amp.custom_bwd(args...)` is deprecated. Please use `torch.amp.custom_bwd(args..., device_type='cuda')` instead.
+  def backward(ctx, grad_output):
+/data/HTC/Library/lamm/lib/python3.9/site-packages/transformers/utils/generic.py:260: FutureWarning: `torch.utils._pytree._register_pytree_node` is deprecated. Please use `torch.utils._pytree.register_pytree_node` instead.
+  torch.utils._pytree._register_pytree_node(
+/data/HTC/Library/lamm/lib/python3.9/site-packages/transformers/utils/generic.py:260: FutureWarning: `torch.utils._pytree._register_pytree_node` is deprecated. Please use `torch.utils._pytree.register_pytree_node` instead.
+  torch.utils._pytree._register_pytree_node(
+/data/HTC/Library/lamm/lib/python3.9/site-packages/torchvision/io/image.py:13: UserWarning: Failed to load image Python extension: libtorch_cuda_cu.so: cannot open shared object file: No such file or directory
+  warn(f"Failed to load image Python extension: {e}")
+Setting ds_accelerator to cuda (auto detect)
+INFO 03-29 15:17:01 [cache_tensor_manager.py:17] USE_GPU_TENSOR_CACHE is On
+WARNING 03-29 15:17:03 [sgl_utils.py:14] sgl_kernel is not installed, you can't use the api of it.                    You can solve it by running `pip install sgl_kernel`.
+WARNING 03-29 15:17:03 [sgl_utils.py:29] sgl_kernel is not installed, or the installed version did not support fa3.         Try to upgrade it.
+WARNING 03-29 15:17:03 [vllm_utils.py:18] vllm is not installed, you can't use the api of it.                    You can solve it by running `pip install vllm`.
+WARNING 03-29 15:17:03 [light_utils.py:13] lightllm_kernel is not installed, you can't use the api of it.
+WARNING 03-29 15:17:03 [grouped_fused_moe_ep.py:28] no deepep or deep_gemm
+INFO 03-29 15:17:03 [communication_op.py:57] deep_ep is not installed, you can't use the api of it.
+{
+    "answers_dir": "/data/HTC/Project/llm/answers/agent_zero_inference3d",
+    "base_data_path": "/data/HTC/Data/dataset/Benchmark/data",
+    "bs": 1,
+    "choose": true,
+    "conv_mode": "simple",
+    "delta_ckpt_path": "/data/HTC/Data/model_zoo/llm_exe/agent_zero/pytorch_model.pt",
+    "encoder_ckpt_path": "/data/HTC/Data/model_zoo/epcl_ckpt/epcl_scannet_vit-L-14_256tokens_latest.pth",
+    "encoder_pretrain": "epcl",
+    "inference_mode": "common",
+    "local_rank": 0,
+    "lora_alpha": 32,
+    "lora_dropout": 0.1,
+    "lora_r": 32,
+    "lora_target_modules": [
+        "q_proj",
+        "k_proj",
+        "v_proj",
+        "o_proj"
+    ],
+    "max_obj_len": 30,
+    "max_tgt_len": 1200,
+    "model": "lamm_peft",
+    "num_vision_token": 256,
+    "stage": 2,
+    "task_type": "Classification",
+    "train_stage": 2,
+    "vicuna_ckpt_path": "/data/HTC/Data/model_zoo/vicuna-7b/Vicuna_7B_v0",
+    "vision_feature_type": "local",
+    "vision_output_layer": -2
+}
+Loading PointBERT config from /data/HTC/Project/llm/src/model/pointbert/PointTransformer_base_8192point.yaml.
+Visual encoder initialized.
+Initializing language decoder from /data/HTC/Data/model_zoo/vicuna-7b/Vicuna_7B_v0 ...
+Loading checkpoint shards:   0%|          | 0/2 [00:00<?, ?it/s]Loading checkpoint shards:  50%|█████     | 1/2 [01:15<01:15, 75.67s/it]Loading checkpoint shards: 100%|██████████| 2/2 [01:41<00:00, 46.47s/it]Loading checkpoint shards: 100%|██████████| 2/2 [01:41<00:00, 50.85s/it]
+Some weights of LlamaForCausalLM were not initialized from the model checkpoint at /data/HTC/Data/model_zoo/vicuna-7b/Vicuna_7B_v0 and are newly initialized: ['model.layers.5.self_attn.rotary_emb.inv_freq', 'model.layers.10.self_attn.rotary_emb.inv_freq', 'model.layers.16.self_attn.rotary_emb.inv_freq', 'model.layers.20.self_attn.rotary_emb.inv_freq', 'model.layers.0.self_attn.rotary_emb.inv_freq', 'model.layers.24.self_attn.rotary_emb.inv_freq', 'model.layers.14.self_attn.rotary_emb.inv_freq', 'model.layers.29.self_attn.rotary_emb.inv_freq', 'model.layers.25.self_attn.rotary_emb.inv_freq', 'model.layers.7.self_attn.rotary_emb.inv_freq', 'model.layers.1.self_attn.rotary_emb.inv_freq', 'model.layers.15.self_attn.rotary_emb.inv_freq', 'model.layers.21.self_attn.rotary_emb.inv_freq', 'model.layers.13.self_attn.rotary_emb.inv_freq', 'model.layers.9.self_attn.rotary_emb.inv_freq', 'model.layers.26.self_attn.rotary_emb.inv_freq', 'model.layers.27.self_attn.rotary_emb.inv_freq', 'model.layers.12.self_attn.rotary_emb.inv_freq', 'model.layers.31.self_attn.rotary_emb.inv_freq', 'model.layers.8.self_attn.rotary_emb.inv_freq', 'model.layers.30.self_attn.rotary_emb.inv_freq', 'model.layers.28.self_attn.rotary_emb.inv_freq', 'model.layers.19.self_attn.rotary_emb.inv_freq', 'model.layers.4.self_attn.rotary_emb.inv_freq', 'model.layers.23.self_attn.rotary_emb.inv_freq', 'model.layers.11.self_attn.rotary_emb.inv_freq', 'model.layers.18.self_attn.rotary_emb.inv_freq', 'model.layers.17.self_attn.rotary_emb.inv_freq', 'model.layers.3.self_attn.rotary_emb.inv_freq', 'model.layers.6.self_attn.rotary_emb.inv_freq', 'model.layers.2.self_attn.rotary_emb.inv_freq', 'model.layers.22.self_attn.rotary_emb.inv_freq']
+You should probably TRAIN this model on a down-stream task to be able to use it for predictions and inference.
+You are using the default legacy behaviour of the <class 'transformers.models.llama.tokenization_llama.LlamaTokenizer'>. If you see this, DO NOT PANIC! This is expected, and simply means that the `legacy` (previous) behavior will be used so nothing changes for you. If you want to use the new behaviour, set `legacy=True`. This should only be set if you understand what it means, and thouroughly read the reason why this was added as explained in https://github.com/huggingface/transformers/pull/24565
+######################## Initial LLM ##########################
+Froeze ll.
+Language decoder initialized.
+LLaMa projection layer initialized.
+[!] merging LoRA weights from /data/HTC/Data/model_zoo/llm_exe/agent_zero/pytorch_model.pt ...
+[!] init the LLM over ...
+  0%|          | 0/1742 [00:00<?, ?it/s]/data/HTC/Library/lamm/lib/python3.9/site-packages/transformers/generation/utils.py:1411: UserWarning: You have modified the pretrained model configuration to control generation. This is a deprecated strategy to control generation and will be removed soon, in a future version. Please use a generation configuration file (see https://huggingface.co/docs/transformers/main_classes/text_generation )
+  warnings.warn(
+  0%|          | 1/1742 [00:06<3:17:08,  6.79s/it]  0%|          | 2/1742 [00:07<1:33:43,  3.23s/it]  0%|          | 3/1742 [00:08<1:01:12,  2.11s/it]  0%|          | 4/1742 [00:09<47:26,  1.64s/it]    0%|          | 5/1742 [00:10<39:10,  1.35s/it]  0%|          | 6/1742 [00:11<35:01,  1.21s/it]  0%|          | 7/1742 [00:11<30:21,  1.05s/it]  0%|          | 8/1742 [00:12<27:42,  1.04it/s]  1%|          | 9/1742 [00:13<26:28,  1.09it/s]  1%|          | 10/1742 [00:14<25:24,  1.14it/s]  1%|          | 11/1742 [00:14<24:48,  1.16it/s]  1%|          | 12/1742 [00:15<23:32,  1.22it/s]  1%|          | 13/1742 [01:13<8:37:28, 17.96s/it]
