@@ -1,19 +1,28 @@
 import os
 from model.openlamm import LAMMPEFTModel
 import torch
-import json
+import json,jsonlines
 import argparse
 from conversations import conv_templates
 from tqdm import tqdm
 from bigmodelvis import Visualization
 from datasets import load_3Deval_dataset
-
+import pickle
 answers_file = ''
 
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--model', type=str, default='openllama_peft')
+    parser.add_argument(
+        "--task_type", type=str, default='Counting', help="task type" #Detection,Counting,Classification,PositionRelation,
+                                                                            # VisualGrounding,RoomDetection,Navigation,VisualGrounding_plus
+                                                                                #VQA,Relation,Caption,ConversationObj,DescriptionObj
+    )
+    # parser.add_argument("--dataset-name", default="detection")
+    parser.add_argument(
+        "--choose", type=bool, default=True, help="choose scene of objects <= 12"
+    )
+    parser.add_argument('--model', type=str, default='lamm_peft')
     parser.add_argument(
         "--encoder_pretrain",
         type=str,
@@ -24,17 +33,25 @@ def parse_args():
     parser.add_argument(
         "--encoder_ckpt_path",
         type=str,
+        default="/data/HTC/Data/model_zoo/epcl_ckpt/epcl_scannet_vit-L-14_256tokens_latest.pth",
         help="path of vision pretrained model; CLIP use default path in cache",
     )
     parser.add_argument(
         "--vicuna_ckpt_path",
         type=str,
-        required=True,
+        # required=True,
+        default="/data/HTC/Data/model_zoo/vicuna-7b/Vicuna_7B_v0",
         help="path of LLM, default: Vicuna",
+    )
+    parser.add_argument(
+        "--train_stage", type=int, default=2, help="1 for obj alignment;2for test；3 for fintune"
     )
     parser.add_argument(
         "--delta_ckpt_path",
         type=str,
+        # default="/media/kou/Data1/htc/LAMM/ckpt/-Llanguage/pytorch_model.pt",
+        # default="/media/kou/Data1/htc/LAMM/ckpt/--ALLV0/pytorch_model_ep2.pt",
+        default="/data/HTC/Data/model_zoo/llm_v1/ALL1/pytorch_model_ep1.pt",
         help="path of delta parameters from previous stage; Only matter for stage 2",
     )
     parser.add_argument('--stage', type=int, default=2,)
@@ -45,16 +62,23 @@ def parse_args():
     parser.add_argument('--lora_target_modules', nargs='+', default=['q_proj', 'k_proj', 'v_proj', 'o_proj'])
     # Embedding configurations
     parser.add_argument('--vision_feature_type', type=str, default='local', choices=('local', 'global'))
-    parser.add_argument('--vision_output_layer', type=int, default=-1, choices=(-1, -2), help='the layer to output visual features; -1 means global from last layer')
-    parser.add_argument('--num_vision_token', type=int, default=1) # the maximum sequence length
+    parser.add_argument('--vision_output_layer', type=int, default=-2, choices=(-1, -2), help='the layer to output visual features; -1 means global from last layer')
+    parser.add_argument('--num_vision_token', type=int, default=256) # the maximum sequence length
     # Test configurations
-    parser.add_argument('--max_tgt_len', type=int, default=400, help="maximum length of target sequence at least 400; in case of 1 vision token")
+    parser.add_argument(
+        "--max_obj_len", type=int, default=30, help="Root dir for images"
+    )
+    parser.add_argument('--max_tgt_len', type=int, default=1200, help="maximum length of target sequence at least 400; in case of 1 vision token")
     parser.add_argument('--conv_mode', type=str, default='simple')
-    parser.add_argument("--dataset-name", required=True)
-    parser.add_argument("--base-data-path", required=True)
     parser.add_argument("--inference-mode", default='common')
     parser.add_argument("--bs", type=int,default=1)
-    parser.add_argument("--answers-dir", required=True)
+    parser.add_argument("--base-data-path", default="/data/HTC/Data/dataset/Benchmark/data")
+    parser.add_argument("--answers-dir", default="../answers")
+    # parser.add_argument("--dataset-name", required=True)
+    # parser.add_argument("--base-data-path", required=True)
+    # parser.add_argument("--answers-dir", required=True)
+    parser.add_argument("--local_rank", default=0, type=int)
+
     args = parser.parse_args()
 
     if args.vision_feature_type == 'local':
@@ -109,6 +133,9 @@ def predict(
     temperature, 
     history, 
     sys_msg,
+    obj_list,
+    list_of_objpoints,
+    task_type,
 ):
     prompt_text = generate_conversation_text(args, input, history, sys_msg)
     response = model.generate({
@@ -117,17 +144,22 @@ def predict(
         'top_p': top_p,
         'temperature': temperature,
         'max_tgt_len': max_length,
-        'modality_embeds': []
+        'modality_embeds': [],
+        'obj_list': obj_list,
+        'list_of_objpoints':list_of_objpoints[:args.max_obj],
+        'task_type':task_type
     })
     history.append((input, response))
     return history
 
 
-def default_response(args,
-                    model,
-                    input,
-                    pcl_paths,
-                    sys_msg):
+def Class_response(args,
+                     model,
+                     input,
+                     pcl_paths,
+                     sys_msg,
+                     obj_lists,
+                     list_of_objpoints):
     """get response text by default
 
     :param args args: input arguments
@@ -137,6 +169,69 @@ def default_response(args,
     :param str sys_msg: system message for test
     :return list: list of response
     """
+    raw_path = pcl_paths[0]
+    candidate_paths = []
+    if os.path.isabs(raw_path):
+        candidate_paths.append(raw_path)
+    else:
+        candidate_paths.append(os.path.join(args.base_data_path, raw_path))
+
+    sample_name = os.path.basename(raw_path)
+    candidate_paths.extend(
+        [
+            os.path.join("/data/HTC/Data/dataset/object_1024_npy", sample_name),
+            os.path.join("/data/HTC/Data/dataset/object_npy", sample_name),
+        ]
+    )
+
+    for candidate in candidate_paths:
+        if os.path.exists(candidate):
+            pcl_paths[0] = candidate
+            break
+    else:
+        raise FileNotFoundError(
+            f"Cannot resolve classification point cloud path from {raw_path}; "
+            f"checked: {candidate_paths}"
+        )
+
+    history = predict(
+        args=args,
+        model=model,
+        input=input,
+        pcl_paths=pcl_paths,
+        max_length=96,
+        top_p=0.6,
+        temperature=0.7,
+        history=[],
+        sys_msg=sys_msg,
+        obj_list=obj_lists,
+        list_of_objpoints=list_of_objpoints,
+        task_type=args.task_type,
+    )
+    response = history[-1][1]
+    ans_list = []
+
+    for res in response:
+        ans_list.append(res.split('###')[0])
+    return ans_list
+
+def Other_response(args,
+                    model,
+                    input,
+                    pcl_paths,
+                    sys_msg,
+                    obj_lists,
+                    list_of_objpoints):
+    """get response text by default
+
+    :param args args: input arguments
+    :param model model: model class
+    :param input input: input text
+    :param object pcl_paths: image objects
+    :param str sys_msg: system message for test
+    :return list: list of response
+    """
+    src_id = pcl_paths[0][44:-4]
     history = predict(
         args=args,
         model=model,
@@ -144,9 +239,12 @@ def default_response(args,
         pcl_paths=pcl_paths,
         max_length=args.max_tgt_len,
         top_p=0.9,
-        temperature=1.0,
+        temperature=0.8,    #0.8,1,2
         history=[],
         sys_msg=sys_msg,
+        obj_list=obj_lists[src_id],
+        list_of_objpoints=list_of_objpoints,
+        task_type=args.task_type,
     )
     response = history[-1][1]
     ans_list = []
@@ -156,74 +254,146 @@ def default_response(args,
     return ans_list
 
 
-def vqa_response(args,
-                model,
-                input,
-                pcl_paths,
-                sys_msg):
-    reasoning_list = default_response(args, model, input, pcl_paths, sys_msg)
-    option_prompt = []
-    for prompt_1, response_1 in zip(input, reasoning_list):
-        option_prompt.append(prompt_1 + response_1 + ' ###\nANSWER:') 
-    final_answer_list = default_response(args, model, option_prompt, pcl_paths, sys_msg)
-    all_answer_list = []
-    # concat reasoning & final answer
-    for reasoning, option in zip(reasoning_list, final_answer_list):
-        all_answer_list.append(reasoning + '\n The answer is ' + option)
-    return all_answer_list
+def Detection_response(args,
+                       model,
+                       input,
+                       pcl_paths,
+                       sys_msg,
+                       obj_lists,
+                       list_of_objpoints):
+    """get response text by default
+
+    :param args args: input arguments
+    :param model model: model class
+    :param input input: input text
+    :param object pcl_paths: image objects
+    :param str sys_msg: system message for test
+    :return list: list of response
+    """
+    src_id = pcl_paths[0][44:-4]
+    input = ["What's the 3D point cloud about?"]
+    num = len(obj_lists)
+    ans_list = []
+    for i in range(num):
+        obj = obj_lists[i]
+        history = predict(
+            args=args,
+            model=model,
+            input=input,
+            pcl_paths=pcl_paths,
+            max_length=args.max_tgt_len,
+            top_p=0.9,
+            temperature=0.8,
+            history=[],
+            sys_msg=sys_msg,
+            obj_list=[obj],
+            list_of_objpoints=list_of_objpoints,
+            task_type=args.task_type,
+        )
+        response = history[-1][1][0].split('###')[0]
+        ans_list.append(response)
+    return [ans_list]
 
 
 def main(args):
-    # load model
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if device.type == "cuda":
+        torch.cuda.set_device(0)
+
     model = LAMMPEFTModel(**args.__dict__)
-    delta_ckpt = torch.load(args.delta_ckpt_path, map_location=torch.device('cpu'))
+    delta_ckpt = torch.load(args.delta_ckpt_path, map_location='cpu', mmap=True)
     model.load_state_dict(delta_ckpt, strict=False)
-    print(f'[!] merging LoRA weights ...')
+    print(f'[!] merging LoRA weights from {args.delta_ckpt_path} ...')
     model.llama_model = model.llama_model.merge_and_unload()
-    model = model.eval().half().cuda()
-    Visualization(model).structure_graph()
+    model = model.eval().half().to(device)
     print(f'[!] init the LLM over ...')
     
     # load data
-    dataset_name = args.dataset_name
+
     inference_mode = args.inference_mode
     batch_size = args.bs
-    if dataset_name in single_infernce_dataset:
-        batch_size = 1
     dataloader = load_3Deval_dataset(
         args.base_data_path,
-        args.dataset_name,
+        args.task_type,
         inference_mode,
         batch_size = batch_size
     )
     sys_msg = dataloader.dataset.system_msg
-    task_name = dataloader.dataset.task_name
+    task_name = dataloader.dataset.task_type
 
-    answers_file_name = task_name + '_' + args.dataset_name + '.json'
+    answers_file_name = task_name + '.json'
     answers_file = os.path.join(args.answers_dir, answers_file_name)
     os.makedirs(os.path.dirname(answers_file), exist_ok=True)
-    
+
+    # exist_list = []
+    # existing = jsonlines.Reader(open("/media/kou/Data1/htc/LAMM/answers/Classification.jsonl"))
+    # for e in existing:
+    #     exist_list.append(e["pcl"][0])
+
+    with open("/data/HTC/Project/Point-BERT/data/ModelNet/modelnet40_normal_resampled/my_test_1024pts_fps.dat", 'rb') as f:
+        list_of_objpoints = pickle.load(f)
+    list_of_class_name = json.load(open("/data/HTC/Project/Point-BERT/data/ModelNet/modelnet40_normal_resampled/my_test.json"))
+    # #删除只有一个点的物体
+    # list_of_objpoints[0] = [npy for index, npy in enumerate(list_of_objpoints[0])]
+    # list_of_objpoints[1] = [npy for index,npy in enumerate(list_of_objpoints[1])]
+
+    if task_name in ['Classification','DescriptionObj','ConversationObj']:
+        args.max_obj = 12
+        obj_lists = [{'name':'Unknown','BoundingBox':[0,0,0,2,2,2]}]
+    elif task_name in ["Detection"]:
+        args.max_obj = 20
+        Detection_lists = json.load(open("/data/HTC/Data/dataset/Benchmark/Task/Task_Reconstruct/Test/Detection.json"))
+    else:
+        args.max_obj = 20
+        obj_lists = json.load(open("/data/HTC/Data/dataset/Benchmark/data/metadata/" + "Detection" + ".json", 'r'))
+
+
     ans_list = []
     ans_file = open(os.path.splitext(answers_file)[0] + '.jsonl', 'w')
-    for data_item in tqdm(dataloader):
+    for index,data_item in enumerate(tqdm(dataloader)):
+        if index>=1385 and task_name == 'Detection':
+            continue
         prompt = data_item['query']
         pcl_paths = data_item['pcl']
-        
-        if task_name == 'VQA':
-            response_func = vqa_response
+
+        if task_name == 'Detection':    #多目标分类只输入单个物体(从场景中割出区别于分类任务)，训练也是如此
+            obj_lists = Detection_lists[index]['object']
+            response_func = Detection_response
+        elif task_name in ['Classification','DescriptionObj','ConversationObj']:
+            response_func = Class_response
+           
+            index = data_item['question_id'][0] - 1
         else:
-            response_func = default_response
-        
+            response_func = Other_response
+
+        if task_name == 'Relation':
+            prompt = ["Generate relational inference generated based on the reality of the objects in the scene. For example, A dining table and a bowl are used for dining. Remember relation explanation must be between two things."]
+        elif task_name == 'Caption':
+            prompt = ["Write a detailed caption by classifying and describing different rooms in 150-200 words, illustrating their types, appearance and other information such as functionalities, usages, daily-life knowledge."]
+        elif task_name == 'VQA':
+            prompt = ["You need to create three question-and-answer pairs centered around the objects, ensuring that the context is interconnected. Format your response as a list,[Q1,A1,Q2,A2,Q3,A3]. Response must be logically related."]
+        elif task_name == 'VisualGrounding_plus':
+            prompt = ["In all objects, tell me w"+prompt[0][1:]]
+        elif task_name == 'DescriptionObj':
+            prompt = [
+                "Describe this object in 1000-2000 words, as if the object is right in front of you. Illustrating its type, appearance and other information such as functionalities, usages, daily-life knowledge."]
+        elif task_name == 'ConversationObj':
+            prompt = [
+                "You must create three question-and-answer pairs centered around this furniture, ensuring that the context is focus on this indoor object point cloud. Format your response as a list,[Q1,A1,Q2,A2,Q3,A3]."]
+
         answer_list = response_func(
             args=args,
             model=model,
             input=prompt,
             pcl_paths=pcl_paths,
             sys_msg=sys_msg,
+            obj_lists=obj_lists,
+            list_of_objpoints = list_of_objpoints[0][index]
         )
 
         for id, output in zip(data_item['id'], answer_list):
             ans_dict = {"id": id,
+                        "pcl": data_item['pcl'],
                         "text": output,
                         "delta_path": args.delta_ckpt_path
                         }

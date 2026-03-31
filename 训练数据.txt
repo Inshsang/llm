@@ -1,0 +1,41 @@
+0 =
+'</Pcl> [AGENT_INTENT]\n
+UserQuestion: Locate the locations of every room within the scene.\n\n
+You are an MLLM agent controller. Output ONE JSON only.\n
+Schema:\n
+{\n
+  "stage":"intent",\n
+  "task":"VisualGrounding_plus|Counting|RoomDetection|PositionRelation",\n
+  "focus": {"target":"", "A":"", "B":""}\n
+  }\n\n
+### gpt:'
+1 =
+'{"stage": "intent", "task": "RoomDetection", "focus": {"target": "", "A": "", "B": ""}}\n###'
+2 =
+'human: [TOOL_RESULT]\n
+Tool=DETECT\n
+Objects(topk=11):\n(obj0):chair bbox=[5.92, 0.42, 3.72, 0.49, 0.84, 0.56]\n
+(obj1):sofa bbox=[5.9, 0.47, 7.18, 1.78, 0.95, 2.65]\n
+(obj2):diningtable bbox=[5.93, 0.39, 4.31, 1.77, 0.79, 1.0]\n
+(obj3):window bbox=[2.92, 1.52, 0.0, 0.88, 1.57, 0.24]\n
+(obj4):window bbox=[3.41, 1.52, 1.73, 0.07, 0.88, 0.89]\n
+(obj5):painting bbox=[1.22, 1.66, 5.11, 0.47, 0.6, 0.02]\n
+(obj6):painting bbox=[0.02, 2.03, 2.92, 0.03, 0.55, 0.84]\n
+(obj7):painting bbox=[0.02, 2.12, 1.99, 0.03, 0.42, 0.61]\n
+(obj8):painting bbox=[3.43, 1.82, 7.92, 0.02, 0.57, 0.82]\n
+(obj9):fridge bbox=[0.42, 0.89, 4.73, 0.81, 1.77, 0.77]\n
+(obj10):garbagecan bbox=[1.28, 0.26, 4.87, 0.68, 0.5, 0.48]\n
+\n
+[AGENT_REVIEW]\nUserQuestion: Locate the locations of every room within the scene.\n
+\n
+Output ONE JSON only.\n
+\n
+### gpt:'
+3 =
+'{"stage": "review", "summary": "Group objects for each room instance and compute unions to localize every room.", "selected_object_indices": [], "room_groups": [{"room_label": "bedroom", "indices": [3, 1]}, {"room_label": "bedroom", "indices": [0, 2]}, {"room_label": "kitchen", "indices": [3, 1]}, {"room_label": "kitchen", "indices": [0, 2]}, {"room_label": "livingroom", "indices": [3, 1]}, {"room_label": "livingroom", "indices": [0, 2]}, {"room_label": "bathroom", "indices": [3, 1]}, {"room_label": "bathroom", "indices": [0, 2]}], "next_tool": {"tool": "BBOX_UNION", "args": {"groups": [{"room_label": "bedroom", "indices": [3, 1]}, {"room_label": "bedroom", "indices": [0, 2]}, {"room_label": "kitchen", "indices": [3, 1]}, {"room_label": "kitchen", "indices": [0, 2]}, {"room_label": "livingroom", "indices": [3, 1]}, {"room_label": "livingroom", "indices": [0, 2]}, {"room_label": "bathroom", "indices": [3, 1]}, {"room_label": "bathroom", "indices": [0, 2]}]}}}\n###'
+4 =
+'human: [TOOL_RESULT]\nTool=BBOX_UNION\nbedroom -> [2.48, -0.85, -0.79, 6.79, 1.79, 7.65]\nbedroom -> [5.04, -0.11, 3.30, 6.81, 0.89, 4.71]\nkitchen -> [2.48, -0.85, -0.79, 6.79, 1.79, 7.65]\nkitchen -> [5.04, -0.11, 3.30, 6.81, 0.89, 4.71]\nlivingroom -> [2.48, -0.85, -0.79, 6.79, 1.79, 7.65]\nlivingroom -> [5.04, -0.11, 3.30, 6.81, 0.89, 4.71]\nbathroom -> [2.48, -0.85, -0.79, 6.79, 1.79, 7.65]\nbathroom -> [5.04, -0.11, 3.30, 6.81, 0.89, 4.71]\n\n[AGENT_FINISH]\nUserQuestion: Locate the locations of every room within the scene.\n\nOutput the FINAL answer only (no JSON).\nFor Counting: output a single integer (already matched to choices).\nFor PositionRelation: output the final option / statement consistent with the question.\nFor RoomDetection: output all room_label + bbox, one room per sentence.\n\n### gpt:'
+5 =
+'bedroom [2.48, -0.85, -0.79, 6.79, 1.79, 7.65]\nbedroom [5.04, -0.11, 3.3, 6.81, 0.89, 4.71]\nkitchen [2.48, -0.85, -0.79, 6.79, 1.79, 7.65]\nkitchen [5.04, -0.11, 3.3, 6.81, 0.89, 4.71]\nlivingroom [2.48, -0.85, -0.79, 6.79, 1.79, 7.65]\nlivingroom [5.04, -0.11, 3.3, 6.81, 0.89, 4.71]\nbathroom [2.48, -0.85, -0.79, 6.79, 1.79, 7.65]\nbathroom [5.04, -0.11, 3.3, 6.81, 0.89, 4.71]\n###'
+len() =
+6

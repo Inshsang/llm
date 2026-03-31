@@ -15,6 +15,9 @@
 import copy
 import os
 import json
+import re
+
+import numpy as np
 from tqdm import tqdm
 import ipdb
 import random
@@ -50,10 +53,250 @@ class_mapping = {
     "garbagecan": 17,
 }
 
+Class_ALL = [
+    "alarmclock",
+    "apple",
+    "armchair",
+    "baseballbat",
+    "basketball",
+    "bed",
+    "book",
+    "boots",
+    "bottle",
+    "bowl",
+    "box",
+    "bread",
+    "butterknife",
+    "candle",
+    "cart",
+    "cellphone",
+    "chair",
+    "cloth",
+    "clothesdryer",
+    "coffeemachine",
+    "coffeetable",
+    "countertop",
+    "creditcard",
+    "cup",
+    "desk",
+    "desklamp",
+    "desktop",
+    "diningtable",
+    "dishsponge",
+    "dogbed",
+    "doorway",
+    "dresser",
+    "dumbbell",
+    "egg",
+    "faucet",
+    "floorlamp",
+    "fork",
+    "fridge",
+    "garbagebag",
+    "garbagecan",
+    "houseplant",
+    "kettle",
+    "keychain",
+    "knife",
+    "ladle",
+    "laptop",
+    "laundryhamper",
+    "lettuce",
+    "microwave",
+    "mug",
+    "newspaper",
+    "ottoman",
+    "painting",
+    "pan",
+    "papertowelroll",
+    "pen",
+    "pencil",
+    "peppershaker",
+    "pillow",
+    "plate",
+    "plunger",
+    "pot",
+    "potato",
+    "remotecontrol",
+    "safe",
+    "saltshaker",
+    "shelvingunit",
+    "sidetable",
+    "sink",
+    "soapbar",
+    "soapbottle",
+    "sofa",
+    "spatula",
+    "spoon",
+    "spraybottle",
+    "statue",
+    "stool",
+    "tabletopdecor",
+    "teddybear",
+    "television",
+    "tennisracket",
+    "tissuebox",
+    "toaster",
+    "toilet",
+    "toiletpaper",
+    "tomato",
+    "tvstand",
+    "vacuumcleaner",
+    "vase",
+    "washingmachine",
+    "watch",
+    "window",
+    "winebottle"
+]
+
 class LAMMDataset(Dataset):
     """LAMM Dataset"""
 
-    def __init__(self, data_file_path: str, vision_root_path: str, vision_type="image"):
+    # def __init__(self, data_file_path: str, vision_root_path: str, choose: bool, vision_type="pcl"):
+    #     """Initialize supervised datasets
+    #
+    #     :param str data_file_path: path of conversation file path
+    #     :param str vision_root_path: vision root path
+    #     :param str vision_type: type of vision data, defaults to 'image', image / pcl
+    #     """
+    #     super(LAMMDataset, self).__init__()
+    #     self.vision_type = vision_type
+    #     self.choose = choose
+    #
+    #     with open(data_file_path, "r") as fr:
+    #         json_data = json.load(fr)
+    #
+    #     self.vision_path_list, self.caption_list, self.task_type_list = [], [], []
+    #     Multi_class_scene2class= {str(i):[0,0,0,0,0,0] for i in range(500,10000)}
+    #     for item in json_data:
+    #         if not vision_type in item:
+    #             continue
+    #         one_vision_name, one_caption = item[vision_type], item["conversations"]
+    #         task_type = item["task_type"] if "task_type" in item else "normal"
+    #
+    #         if not one_vision_name.startswith("/"):
+    #             one_vision_path = os.path.join(vision_root_path, one_vision_name)
+    #         else:
+    #             one_vision_path = one_vision_name
+    #
+    #         if item['task_type'] == 'Detection3d':
+    #             Multi_class_scene2class[item['src_id']] = item['box']
+    #         self.vision_path_list.append(one_vision_path)
+    #         self.caption_list.append(one_caption)
+    #         self.task_type_list.append(task_type)
+    #
+    #     self.num2name = json.load(open("/media/kou/Data3/htc/dataset/Object/my_names.json"))
+    #     with open("/media/kou/Data3/htc/dataset/Object/my_train_8192pts_fps.dat", 'rb') as f:
+    #         self.list_of_objpoints = pickle.load(f)
+    #
+    #
+    #     # with open("/media/kou/Data3/htc/dataset/cut_scene_train.dat", 'rb') as f:
+    #     #     self.detection_gt = pickle.load(f)
+    #     # self.detection_gt = torch.tensor(self.detection_gt)
+    #
+    #     with open("/media/kou/Data3/htc/dataset/cut_scene_500_label.dat", 'rb') as f:
+    #         self.detection_gt_500_num = pickle.load(f)
+    #     with open("/media/kou/Data3/htc/dataset/cut_scene_train_label.dat", 'rb') as f:
+    #         self.detection_gt_num = pickle.load(f)
+    #
+    #     self.detection_gt_num = torch.tensor(self.detection_gt_num)
+    #     self.detection_gt_500_num = torch.tensor(self.detection_gt_500_num)
+    #     num = torch.sum(self.detection_gt_num)
+    #     num_500 = torch.sum(self.detection_gt_500_num)
+    #     self.detection_gt = ["/media/kou/Data3/htc/Detection_obj/"+str(i)+".npy" for i in range(num)]
+    #     self.detection_gt_500 = ["/media/kou/Data3/htc/Detection_obj/" + str(i) + "_500.npy" for i in range(num_500)]
+    #
+    #     self.list_of_objpoints =[["/media/kou/Data3/htc/Objects_8192_npy/points/"+str(i)+".npy" for i in range(9500)],
+    #                              ["/media/kou/Data3/htc/Objects_8192_npy/labels/"+str(i)+".npy" for i in range(9500)]]
+    #
+    #     # self.map_class2points={self.vision_path_list[i]: "/media/kou/Data3/htc/Objects_8192_npy/points/"+str(i)+".npy"
+    #     #                   for i in range(len(self.vision_path_list))}
+    #     # self.map_class2labels = {self.vision_path_list[i]: "/media/kou/Data3/htc/Objects_8192_npy/labels/" + str(i) + ".npy"
+    #     #                     for i in range(len(self.vision_path_list))}
+    #
+    #     class_map = json.load(open("/media/kou/Data3/htc/dataset/Object/my_train.json"))
+    #     self.map_class2points = {vision_root_path+'/Objects/'+class_map[i]+".npy": "/media/kou/Data3/htc/Objects_8192_npy/points/" + str(i) + ".npy" for i in range(len(class_map))}
+    #     self.map_class2labels = {vision_root_path+'/Objects/'+class_map[i]+".npy": "/media/kou/Data3/htc/Objects_8192_npy/labels/" + str(i) + ".npy" for i in range(len(class_map))}
+    #     self.map_scene2points=["/media/kou/Data3/htc/Objects_8192_npy/points/"+str(i)+".npy" for i in range(len(self.vision_path_list))]
+    #
+    #     p0 = 0
+    #     self.pos = []
+    #     for p in self.detection_gt_num:
+    #         self.pos.append(int(p0))
+    #         p0 += p
+    #     p0 = 0
+    #     self.pos_500 = []
+    #     for p in self.detection_gt_500_num:
+    #         self.pos_500.append(int(p0))
+    #         p0 += p
+    #
+    #
+    #     self.scene_gt = {}
+    #     index = -1
+    #     index_500 = -1
+    #     with open("/media/kou/Data1/htc/MYDATA/BenchMark/Task/GT/Detection.json", "r") as G:
+    #         jsonlines_data = jsonlines.Reader(G)
+    #         for lines in jsonlines_data:
+    #             id = next(iter(lines))
+    #
+    #             if int(id)<10000 and int(id) >= 500:
+    #                 #增加单个场景物体
+    #                 inclass_box = []
+    #                 inclass_class = []
+    #                 index += 1
+    #                 bbox = lines[id]
+    #                 for i in bbox:
+    #                     if not len(i):
+    #                         continue
+    #                     if i['name'].lower() in Class_ALL:
+    #                         inclass_box.append(i['name'].lower())
+    #                         inclass_class.append(i['BoundingBox'])
+    #
+    #                 all_num = int(self.detection_gt_num[index])
+    #                 start_num = self.pos[index]
+    #                 inclass_points=self.detection_gt[start_num:start_num+all_num]
+    #                 self.scene_gt[id] = {'classes':inclass_box,'boxes':inclass_class,'points':inclass_points,"Multi_class":Multi_class_scene2class[id]}
+    #
+    #             if int(id) < 500:
+    #                 #增加单个场景物体
+    #                 inclass_box = []
+    #                 inclass_class = []
+    #                 index_500 += 1
+    #                 bbox = lines[id]
+    #                 for i in bbox:
+    #                     if not len(i):
+    #                         continue
+    #                     if i['name'].lower() in Class_ALL:
+    #                         inclass_box.append(i['name'].lower())
+    #                         inclass_class.append(i['BoundingBox'])
+    #                 all_num = int(self.detection_gt_500_num[index_500])
+    #                 start_num = self.pos_500[index_500]
+    #                 inclass_points=self.detection_gt_500[start_num:start_num+all_num]
+    #                 self.scene_gt[id] = {'classes':inclass_box,'boxes':inclass_class,'points':inclass_points}
+    #
+    #     # self.choosen_num = len(self.detection_gt_num)
+    #     # if self.choose:
+    #     #     choose_tensor = self.detection_gt_num <= 12
+    #     #     numall = int(choose_tensor.sum())
+    #     #     self.choosen = list(np.array(choose_tensor))
+    #     #     self.choosen_num = len(self.choosen)
+    #     #     new_pos = numall*[None]
+    #     #     p0, index = 0,0
+    #     #     for f,p in zip(self.choosen,self.detection_gt_num):
+    #     #         if f:
+    #     #             new_pos[index] = p0
+    #     #             index += 1
+    #     #         p0 += int(p)
+    #     #     self.pos = new_pos
+    #     #     self.detection_gt_label = self.detection_gt_num[choose_tensor]
+    #         # self.vision_path_list = [path for f, path in zip(self.choosen,self.vision_path_list) if f]
+    #         # self.caption_list = [caption for f, caption in zip(self.choosen, self.caption_list) if f]
+    #         # self.task_type_list = [task_type for f, task_type in zip(self.choosen, self.task_type_list) if f]
+    #         # self.list_of_objpoints[0] = [points for f, points in zip(self.choosen, self.list_of_objpoints[0]) if f]
+    #         # self.list_of_objpoints[1] = [points_label for f, points_label in zip(self.choosen, self.list_of_objpoints[1]) if f]
+    #         # self.scene_gt = [c for i,c in zip(self.choosen,self.scene_gt) if i]
+    #     print(f"[!] collect {len(self.vision_path_list)} samples for training")
+    def __init__(self, data_file_path: str, vision_root_path: str, choose: bool, vision_type="pcl"):
         """Initialize supervised datasets
 
         :param str data_file_path: path of conversation file path
@@ -62,10 +305,13 @@ class LAMMDataset(Dataset):
         """
         super(LAMMDataset, self).__init__()
         self.vision_type = vision_type
+        self.choose = choose
+
         with open(data_file_path, "r") as fr:
             json_data = json.load(fr)
 
         self.vision_path_list, self.caption_list, self.task_type_list = [], [], []
+        Multi_class_scene2class= {str(i):[0,0,0,0,0,0] for i in range(0,10000)}
         for item in json_data:
             if not vision_type in item:
                 continue
@@ -77,76 +323,182 @@ class LAMMDataset(Dataset):
             else:
                 one_vision_path = one_vision_name
 
+            if item['task_type'] == 'Detection3d':
+                Multi_class_scene2class[item['src_id']] = item['box']
             self.vision_path_list.append(one_vision_path)
             self.caption_list.append(one_caption)
             self.task_type_list.append(task_type)
-        print(f"[!] collect {len(self.vision_path_list)} samples for training")
-        with open("/media/kou/Data3/htc/dataset/cut_scene_train.dat", 'rb') as f:
-            self.detection_gt = pickle.load(f)
-        self.detection_gt = torch.tensor(self.detection_gt)
 
-        with open("/media/kou/Data3/htc/dataset/cut_scene_train_label.dat", 'rb') as f:
-            self.detection_gt_label = pickle.load(f)
-        self.detection_gt_label = torch.tensor(self.detection_gt_label)
-        p0 = 0
-        self.pos = []
-        for p in self.detection_gt_label:
-            self.pos.append(int(p0))
-            p0 += p
-        self.class_gt = []
-        with open("/media/kou/Data1/htc/MYDATA/BenchMark/Task/GT/Detection.json", "r") as G:
+        self.num2name = json.load(open("/data/HTC/Data/dataset/object_add/my_names.json"))
+        with open("/data/HTC/Project/Point-BERT/data/ModelNet/modelnet40_normal_resampled/my_train_1024pts_fps.dat", 'rb') as f:
+            self.list_of_objpoints = pickle.load(f)
+
+        class_map = json.load(open("/data/HTC/Project/Point-BERT/data/ModelNet/modelnet40_normal_resampled/my_train.json"))
+        # self.map_class2points = {vision_root_path+'/object_npy/'+class_map[i]+".npy": "/media/kou/Data3/htc/Objects_8192_npy/points/" + str(i) + ".npy" for i in range(len(class_map))}
+        # self.map_class2labels = {vision_root_path+'/object_npy/'+class_map[i]+".npy": "/media/kou/Data3/htc/Objects_8192_npy/labels/" + str(i) + ".npy" for i in range(len(class_map))}
+        self.map_class2points = {}
+        self.map_class2labels = {}
+        class_target_root = '/data/HTC/Data/dataset/object_1024_npy'
+        for i in range(len(class_map)):
+            sample_name = class_map[i]
+            sample_file = sample_name if sample_name.endswith('.npy') else sample_name + '.npy'
+            target_file = os.path.join(class_target_root, sample_file)
+
+            # 兼容历史与当前两种输入路径格式
+            key_variants = [
+                os.path.join(vision_root_path, 'Objects', sample_file),
+                os.path.join(vision_root_path, 'object_1024_npy', sample_file),
+                sample_file,
+                sample_name,
+            ]
+            for key in key_variants:
+                self.map_class2points[key] = target_file
+                self.map_class2labels[key] = target_file
+        self.scene_gt = {}
+        index = -1
+        self.VG = json.load(open("/data/HTC/Data/dataset/Benchmark/Task/GT/VisualGrounding.json", "r"))
+        with open("/data/HTC/Data/dataset/Benchmark/Task/GT/Detection.json", "r") as G:
             jsonlines_data = jsonlines.Reader(G)
             for lines in jsonlines_data:
                 id = next(iter(lines))
-                if int(id)<500 or int(id)>=10000:
-                    continue
+                if int(id)<10000:
+                    inclass_box = []
+                    inclass_class = []
+                    index += 1
+                    bbox = lines[id]
+                    for i in bbox:
+                        if not len(i):
+                            continue
+                        if i['name'].lower() in Class_ALL:
+                            inclass_box.append(i['name'].lower())
+                            inclass_class.append(i['BoundingBox'])
+                    self.scene_gt[id] = {'classes':inclass_box,'boxes':inclass_class,"Multi_class":Multi_class_scene2class[id]}
 
-                inclass_box = []
-                inclass_class = []
-                bbox = lines[id]
-                for i in bbox:
-                    if not len(i):
-                        continue
-                    if i['name'].lower() in class_mapping.keys():
-                        inclass_box.append(i['name'].lower())
-                        inclass_class.append(i['BoundingBox'])
-                self.class_gt.append({id:inclass_box,'box':inclass_class})
+
+        print(f"[!] collect {len(self.vision_path_list)} samples for training")
 
     def __len__(self):
         """get dataset length
 
         :return int: length of dataset
         """
-        return len(self.pos)
+        return len(self.vision_path_list)
+
 
     def __getitem__(self, i):
         """get one sample"""
-        detection_gt_label = self.detection_gt_label[i]
-        pos = self.pos[i]
-        class_gt = list(self.class_gt[i].values())[0]
-        class_box = list(self.class_gt[i].values())[1]
+        raw_task_type = self.task_type_list[i]
+        task_type = raw_task_type
+        vision_path = self.vision_path_list[i]
+        output_texts = self.caption_list[i]
+
+        def _scene_id_from_path(path: str) -> str:
+            stem = os.path.splitext(os.path.basename(path))[0]
+            if stem in self.scene_gt:
+                return stem
+            if '_' in stem:
+                prefix = stem.split('_', 1)[0]
+                if prefix in self.scene_gt:
+                    return prefix
+            digits = ''.join(ch for ch in stem if ch.isdigit())
+            if digits in self.scene_gt:
+                return digits
+            return stem
+
+        def _normalize_openlamm_task(task_name: str) -> str:
+            mapping = {
+                'classification3d': 'Classification3d',
+                'detection3d': 'Detection3d',
+                'conversation3d': 'conversation3d',
+                'description3d': 'description3d',
+                'VQA3d': 'VQA3d',
+            }
+            return mapping.get(task_name, task_name)
+
+        def _extract_openlamm_boxes(conversations):
+            if not conversations or len(conversations) < 2:
+                return [], []
+            answer = conversations[1].get('value', '')
+            boxes = []
+            for coords in re.findall(r'\[([^\]]+)\]', answer):
+                try:
+                    nums = [float(x.strip()) for x in coords.split(',')]
+                except ValueError:
+                    continue
+                if len(nums) >= 6:
+                    boxes.append(nums[:6])
+            labels = ['scene'] * len(boxes)
+            return boxes, labels
+
+        def _scene_box_from_npy(path: str):
+            pcl = np.load(path)
+            if pcl.ndim != 2 or pcl.shape[1] < 3:
+                raise ValueError(f'Unexpected point cloud shape for OpenLAMM sample: {path} -> {pcl.shape}')
+            xyz = pcl[:, :3]
+            xyz_min = xyz.min(axis=0)
+            xyz_max = xyz.max(axis=0)
+            center = ((xyz_min + xyz_max) / 2.0).tolist()
+            size = (xyz_max - xyz_min).tolist()
+            return center + size
+
+        is_openlamm_sample = ('/LAMM/3D_Instruct/' in vision_path) or ('3rscan_pcls/' in vision_path) or ('shapenet_pcls/' in vision_path)
+        if is_openlamm_sample:
+            task_type = _normalize_openlamm_task(raw_task_type)
+            if raw_task_type == 'classification3d':
+                points_path = vision_path
+                label_path = os.path.basename(vision_path)
+            elif raw_task_type == 'detection3d':
+                points_path, label_path = _extract_openlamm_boxes(output_texts)
+                if not points_path:
+                    points_path = [_scene_box_from_npy(vision_path)]
+                    label_path = ['scene']
+            elif raw_task_type in ['conversation3d', 'description3d', 'VQA3d']:
+                points_path = [_scene_box_from_npy(vision_path)]
+                label_path = ['scene']
+            else:
+                points_path = [_scene_box_from_npy(vision_path)]
+                label_path = ['scene']
+        elif raw_task_type in ['Classification3d', 'DescriptionObj3d', 'ConversationObj3d']:
+            key = vision_path
+            if key not in self.map_class2points:
+                key = os.path.basename(key)
+            points_path = self.map_class2points[key]
+            label_path = self.map_class2labels[key]
+        elif raw_task_type in ['Detection3d']:
+            scene_id = _scene_id_from_path(vision_path)
+            points_path = self.scene_gt[scene_id]['Multi_class']
+            label_path = self.scene_gt[scene_id]['classes']
+            vision_path = '/data/HTC/Data/dataset/Benchmark/data/scene/' + scene_id + '.ply'
+        elif raw_task_type in ['Agent3d']:
+            scene_id = _scene_id_from_path(vision_path)
+            points_path = self.scene_gt[scene_id]['boxes']
+            label_path = self.scene_gt[scene_id]['classes']
+            vision_path = '/data/HTC/Data/dataset/Benchmark/data/scene/' + scene_id + '.ply'
+        else:
+            scene_id = _scene_id_from_path(vision_path)
+            points_path = self.scene_gt[scene_id]['boxes']
+            label_path = self.scene_gt[scene_id]['classes']
+            vision_path = '/data/HTC/Data/dataset/Benchmark/data/scene/' + scene_id + '.ply'
         return dict(
-            vision_paths=self.vision_path_list[i],
-            output_texts=self.caption_list[i],
+            vision_paths=vision_path,
+            output_texts=output_texts,
             vision_type=self.vision_type,
-            task_type=self.task_type_list[i],
-            detection_gt = self.detection_gt[pos:pos+detection_gt_label],
-            class_gt=class_gt,
-            class_box_gt=class_box,
+            task_type=task_type,
+            points_path = points_path,
+            label_path=label_path
         )
 
     def collate(self, instances):
         """collate function for dataloader"""
-        vision_paths, output_texts, task_type ,detection_gt,class_gt,class_box_gt= tuple(
+        vision_paths, output_texts, task_type ,points_path,label_path= tuple(
             [instance[key] for instance in instances]
-            for key in ("vision_paths", "output_texts", "task_type","detection_gt","class_gt","class_box_gt")
+            for key in ("vision_paths", "output_texts", "task_type","points_path","label_path")
         )
         return dict(
             vision_paths=vision_paths,
             output_texts=output_texts,
             vision_type=self.vision_type,
             task_type=task_type,
-            detection_gt=detection_gt,
-            class_gt=class_gt,
-            class_box_gt=class_box_gt,
+            points_path = points_path,
+            label_path=label_path
         )

@@ -11,7 +11,10 @@ import types
 from collections import OrderedDict
 from copy import deepcopy
 
-import ipdb
+try:
+	import ipdb  # type: ignore
+except Exception:
+	ipdb = None
 import numpy as np
 import torch
 import torch.nn as nn

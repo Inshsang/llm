@@ -1,0 +1,10 @@
+# ninja log v5
+2	15874	1718783317561540032	/media/kou/Data1/htc/LAMM/src/model/EPCL/third_party/pointnet2/build/temp.linux-x86_64-cpython-310/_ext_src/src/interpolate_gpu.o	3cabc73e46b96860
+2	15886	1718783317573539963	/media/kou/Data1/htc/LAMM/src/model/EPCL/third_party/pointnet2/build/temp.linux-x86_64-cpython-310/_ext_src/src/group_points_gpu.o	f612be8476e7e505
+1	15908	1718783317597539825	/media/kou/Data1/htc/LAMM/src/model/EPCL/third_party/pointnet2/build/temp.linux-x86_64-cpython-310/_ext_src/src/ball_query_gpu.o	fd8eaa5b4d09099e
+3	16217	1718783317905538061	/media/kou/Data1/htc/LAMM/src/model/EPCL/third_party/pointnet2/build/temp.linux-x86_64-cpython-310/_ext_src/src/sampling_gpu.o	662f103adac5dacd
+0	19092	1718783320773521617	/media/kou/Data1/htc/LAMM/src/model/EPCL/third_party/pointnet2/build/temp.linux-x86_64-cpython-310/_ext_src/src/ball_query.o	ff5459a0bd0b1db2
+2	19195	1718783320877521021	/media/kou/Data1/htc/LAMM/src/model/EPCL/third_party/pointnet2/build/temp.linux-x86_64-cpython-310/_ext_src/src/sampling.o	9071213ea239d510
+1	19242	1718783320925520745	/media/kou/Data1/htc/LAMM/src/model/EPCL/third_party/pointnet2/build/temp.linux-x86_64-cpython-310/_ext_src/src/group_points.o	7e2432b454d87cf
+2	19343	1718783321029520149	/media/kou/Data1/htc/LAMM/src/model/EPCL/third_party/pointnet2/build/temp.linux-x86_64-cpython-310/_ext_src/src/interpolate.o	2564fb98f6725db7
+1	19429	1718783321113519667	/media/kou/Data1/htc/LAMM/src/model/EPCL/third_party/pointnet2/build/temp.linux-x86_64-cpython-310/_ext_src/src/bindings.o	6b69b390fafae3f7

@@ -29,11 +29,17 @@ from transformers.utils import (
 from transformers.models.llama.configuration_llama import LlamaConfig
 from transformers.generation import GenerationConfig
 
-from lightllm.common.basemodel.basemodel import TpPartBaseModel
-from lightllm.models.llama.model import LlamaTpPartModel
-# from lightllm.models.llama2.model import Llama2TpPartModel
-
-from lightllm.common.basemodel.layer_weights.transformer_layer_weight import TransformerLayerWeight
+_lightllm_import_error = None
+try:
+    from lightllm.common.basemodel.basemodel import TpPartBaseModel
+    from lightllm.models.llama.model import LlamaTpPartModel
+    # from lightllm.models.llama2.model import Llama2TpPartModel
+    from lightllm.common.basemodel.layer_weights.transformer_layer_weight import TransformerLayerWeight
+except Exception as e:
+    _lightllm_import_error = e
+    TpPartBaseModel = None
+    LlamaTpPartModel = None
+    TransformerLayerWeight = None
 
 logger = logging.get_logger(__name__)
 
@@ -107,6 +113,13 @@ class LlamaModel:
                  lora_path=None,
                  lora_config: LoraConfig=None):
         super().__init__()
+        if _lightllm_import_error is not None:
+            raise RuntimeError(
+                "LightLLM import failed; set up LightLLM environment or avoid LlamaLightForCausalLM. "
+                f"Original error: {_lightllm_import_error}"
+            )
+        if weight_dir is None:
+            raise ValueError("weight_dir is None for LlamaLightForCausalLM; set --vicuna_ckpt_path to a valid directory")
         if 'llama2' in weight_dir:
             model_cls = Llama2TpPartModel
         else:

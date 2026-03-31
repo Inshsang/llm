@@ -11,7 +11,7 @@ models:
       test_dataset: SelfInstructTestDataset
 
 # ========= Global configuration ========== #
-logging_step: 5
+logging_step: 50
 # ========= Global configuration ========== #
 
 # generation hyper-parameters
@@ -38,14 +38,14 @@ lora_target_modules: ['q_proj', 'k_proj', 'v_proj', 'o_proj']
 
 # deepspeed arguments
 deepspeed:
-  train_batch_size: 16
+  train_batch_size: 8
   train_micro_batch_size_per_gpu: 1
   gradient_accumulation_steps: 8
   gradient_clipping: 1.0
   steps_per_print: 1
 
   zero_optimization:
-    stage: 3
+    stage: 1
     contiguous_gradients: true
     overlap_comm: true
     contiguous_gradients: true

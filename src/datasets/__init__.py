@@ -20,7 +20,7 @@ def load_lamm_dataset(args):
     :return tupe: dataset, dataloader, sampler
     """
     dataset = LAMMDataset(
-        args["data_path"], args["vision_root_path"], args["vision_type"]
+        args["data_path"], args["vision_root_path"],args["choose"]
     )
     # sampler = torch.utils.data.SequentialSampler(dataset)
     sampler = torch.utils.data.RandomSampler(dataset)
@@ -33,9 +33,9 @@ def load_lamm_dataset(args):
     dataloader = DataLoader(
         dataset,
         batch_sampler=batch_sampler,
-        num_workers=1,
+        num_workers=4,
         collate_fn=dataset.collate,
-        pin_memory=True,
+        pin_memory=False,
     )
     return dataset, dataloader, sampler
 
@@ -54,12 +54,12 @@ def load_2Deval_dataset(base_data_path,
 
 
 def load_3Deval_dataset(base_data_path,
-                        dataset_name,
+                        task_type,
                         mode='common',
                         load_data=True,
                         batch_size=1):
     dataset = LAMM_EVAL_3D(base_data_path,
-                           dataset_name,
+                           task_type,
                            mode,
                            load_data)
     dataloader = DataLoader(dataset=dataset, batch_size=batch_size, shuffle=False, num_workers=2, drop_last=False, collate_fn=collate_fn)
